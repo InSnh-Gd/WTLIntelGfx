@@ -10,7 +10,7 @@
 - **VF专用**：只服务 SR-IOV VF（`has_sriov`、VF 早期 MMIO、IRQ 前的 CT 轮询、VF 复位、memirq）。
 - **忽略**：临时诊断、客户机构建脚本、virtio-gpu / QEMU，以及本仓库已经有的行为。
 
-合计 115。裸机需要 34，忽略 76，VF专用 5。
+合计 115。裸机需要 32，忽略 78，VF专用 5。
 
 难度「不移植」表示这一项不进点亮分支。裸机需要里标了「第一帧之后」的，同样先不挡 GuC 和第一帧。
 
@@ -62,13 +62,13 @@
 | `0040-linux_rcu-fork-end-each-RCU-read-section-on-the-reco.patch` | rcu_read_unlock 结束的是开始时那条记录。读者迁移后会拆错 per-CPU epoch | 忽略 | 0039 | 不移植 | 同上。宽限期开销见 drm-kmod 0001 |
 | `0041-linux_rcu-fork-report-migrated-readers-per-RCU-type.patch` | 按 RCU 类型统计发生过迁移的读者 | 忽略 | 0040 | 不移植 | 无 |
 | `0042-nmx-cdev-log-a-user-mmap-only-when-it-fails.patch` | 用户 mmap 只在失败时打印 | 忽略 | 无 | 不移植 | 无 |
-| `0043-bsdcompat-a-process-record-whose-pid-changed-belongs.patch` | pid 已变的进程记录视为已退出进程的残留。XNU 会复用 pid | 裸机需要 | 无 | 中 | shim 的进程/线程记录。WindowServer 重启后再核对，不挡第一帧 |
-| `0044-bsdcompat-a-thread-record-whose-xnu-thread-id-change.patch` | XNU thread id 已变的线程记录视为已退出线程。否则新线程继承死进程的 mm | 裸机需要 | 0043 | 中 | 同上 |
-| `0045-nmx_mm-hold-a-task-reference-for-each-mm-record-and-.patch` | mm 记录和每段 wiring 持有 task 引用，任务退出后映射为空并返回 EFAULT，而不是用悬空 task | 裸机需要 | 0044 | 中 | shim 的 user wire / vm。与 0043 一起核对 |
-| `0046-linux_page-refuse-opportunistic-higher-order-page-al.patch` | order>0 且 __GFP_NORETRY 的分配直接失败，TTM 立刻用单页。碎片化后 8MB BO 从约 740ms 降到 1ms 以内 | 裸机需要 | 无 | 低 | xkpi/src/lkpi/linux_page.c。BO 分配变慢时再做 |
+| `0043-bsdcompat-a-process-record-whose-pid-changed-belongs.patch` | pid 已变就丢掉按 proc 指针长期留着的进程记录。XNU 复用指针后，旧 mm 指向已销毁的 task | 忽略 | 无 | 不移植 | pfind 按 pid 查，没有这种不释放的指针缓存 |
+| `0044-bsdcompat-a-thread-record-whose-xnu-thread-id-change.patch` | thread_t 复用时按 thread_tid 判定旧线程记录失效 | 忽略 | 0043 | 不移植 | tdfind 按 tid 查。与 0043 同一类缓存，本仓库没有 |
+| `0045-nmx_mm-hold-a-task-reference-for-each-mm-record-and-.patch` | mm 记录和每段 wiring 持有 task 引用。任务退出后接线得到空 map，返回 EFAULT，而不是走过已销毁的 vm_map | 裸机需要 | 0036 | 中 | xe userptr 异步 pin 时核对 shim 的 user wire 是否仍持有 task。不挡第一帧 |
+| `0046-linux_page-refuse-opportunistic-higher-order-page-al.patch` | order>0 且 __GFP_NORETRY 时直接返回 NULL。现有代码只加了 VM_ALLOC_NORECLAIM，仍会调用 vm_page_alloc_noobj_contig | 裸机需要 | 无 | 低 | xkpi/src/lkpi/linux_page.c 的 linux_alloc_pages。BO 分配变慢时再做 |
 | `0047-xe-fork-always-dispatch-VF-memirq-user-and-GUC2HOST-.patch` | VF memirq 每次都分发 user 和 GUC2HOST，按 Intel 对内存中断的编程说明从 7.2 回移 | VF专用 | 0001 | 不移植 | PF 用 GT/display 中断加 MSI，不走 memirq |
 | `0048-xe-fork-Xe3-LRC-workarounds-14026781792-22021007897-.patch` | 三条 Xe3 LRC workaround：14026781792、22021007897、14024681466，写在 context image 里 | 裸机需要 | 里程碑1 | 低 | 直接改编译的 xe_wa.c 和 xe_gt_regs.h |
-| `0049-xe-fork-READ_ONCE-WRITE_ONCE-on-the-G2H-fence-done-f.patch` | G2H fence 的 done 标志：等待侧 READ_ONCE，完成侧 WRITE_ONCE | 裸机需要 | 0011 | 低 | 直接改编译的 xe_guc_ct.c |
+| `0049-xe-fork-READ_ONCE-WRITE_ONCE-on-the-G2H-fence-done-f.patch` | G2H fence 的 done 标志：等待侧 READ_ONCE，完成侧 WRITE_ONCE。补丁锚点假定 0010 已把等待拆成两处 | 裸机需要 | 无 | 低 | 按 6.14 原文件的等待点改 xe_guc_ct.c，不套这份 diff 的上下文 |
 | `0050-xe-fork-runtime-resume-from-reclaim-is-safe-on-a-VF-.patch` | xe_rpm_reclaim_safe 去掉 !has_sriov。6.14 在 has_sriov 时把 system CCS 的 BO 移动打进 drm_WARN | 忽略 | 0001 | 不移植 | 点亮路径不设 has_sriov。以后打开该标志时再打这一处 |
 
 ## nvidia-macos-driver（47）

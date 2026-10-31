@@ -203,7 +203,7 @@ vibe 的 README 写了：VM 显示是 VM 专有的；xe、LinuxKPI、sandbox 的
 ### 里程碑 3：Xe3 的渲染 workaround
 
 12. **三条 LRC workaround，** 直接移植 vibe `0048`：`14026781792`（`FF_MODE` `DIS_TE_PATCH_CTRL`）、`22021007897`（`SBE_PUSH_CONSTANT_BEHIND_FIX_ENABLE`）、`14024681466`（`FAST_CLEAR_VALIGN_FIX`）。6.14 的 `xe_wa.c` 没有这三条，它们在 context image 里，PF 和 VF 都要写。版本范围是 graphics 30.00–30.05（第一条到 35.10），B0 也包含。主线里另有一批 A0–B0 的 WA，范围不含 B0；B082 是 B0，那些先不移植。
-13. **G2H fence。** 移植 vibe `0049`：`guc_ct_send_recv` 用 `READ_ONCE` 读 `g2h_fence.done`，`parse_g2h_response` 用 `WRITE_ONCE` 写。
+13. **G2H fence。** 在 6.14 的 `xe_guc_ct.c` 里，`guc_ct_send_recv` 用 `READ_ONCE` 读 `g2h_fence.done`，`parse_g2h_response` 用 `WRITE_ONCE` 写。vibe `0049` 的补丁锚点假定已经打过 `0010`（等待被拆成两处）。点亮不带 `0010`，按原文件的等待点改，不按那份 diff 硬套。
 14. **`0050` 先不打。** 它删掉 `xe_rpm_reclaim_safe` 里的 `&& !xe->info.has_sriov`。6.14 的裸机路径不设置 `has_sriov`，这个条件为真，system CCS 的 BO 移动不会走那条 `drm_WARN`。哪天 `ptl_desc.has_sriov` 打开（主线就是这样，而且 PF 仍是 PF），再把 `0050` 一起带上。
 
 ### 里程碑 4：面板和桌面
@@ -215,9 +215,9 @@ vibe 的 README 写了：VM 显示是 VM 专有的；xe、LinuxKPI、sandbox 的
 
 ### 点亮之后再做
 
-- vibe `0046`：`__GFP_NORETRY` 的高阶页在碎片化之后每次要几百毫秒。TTM 建大 BO 变慢时再拒绝 order > 0。
+- vibe `0046`：`linux_alloc_pages` 对 `__GFP_NORETRY` 已经加上 `VM_ALLOC_NORECLAIM`，但 order > 0 仍调用 `vm_page_alloc_noobj_contig`。碎片化后这次连续分配会走很久。TTM 建大 BO 变慢时，order > 0 直接返回 NULL。
 - vibe `0036`/`0037`：userptr 写接线失败时退回只读。i915 路径上只读区间会在提交时失败，xe 也会碰到。
-- vibe `0043`/`0044`/`0045`：XNU 会复用 `thread_t` 和 pid。WindowServer 重启后的 panic 再核对我们的线程记录有没有同一类残留。
+- vibe `0045`：用户页接线在任务退出后仍可能碰到已经销毁的 `vm_map`。`0043`/`0044` 修的是 NullMoth 按 `proc_t` / `thread_t` 指针长期缓存、且不释放的记录；本仓库的 `pfind` / `tdfind` 按 pid 和 tid 查，不移植那两份。
 - drm-kmod `0001`：`drm_file_update_pid` 里对 FreeBSD 的整数 pid 跳过 `synchronize_rcu()`。每个新 ioctl 线程少等一次宽限期。
 - libdrm `0004`/`0005` 和 nvidia `0045`、xkpi `0032`：App Sandbox 完全打不开 `/dev/dri` 时的 token fd。WindowServer 的 IOKit 回退已经有了，这是给计算器、WebKit GPU 进程的。
 - issue #11 的 OpenCore x2APIC 表。没有它，Framework 上无法做任何阶段的实机验证。
@@ -256,9 +256,9 @@ vibe 的 README 写了：VM 显示是 VM 专有的；xe、LinuxKPI、sandbox 的
 
 | 分类 | 数量 |
 |---|---|
-| 裸机需要 | 34 |
-| 忽略（诊断、构建脚本、virtio/QEMU、本仓库已有、6.14 点亮用不上的 walker/RCU/临界区） | 76 |
+| 裸机需要 | 32 |
+| 忽略（诊断、构建脚本、virtio/QEMU、本仓库已有、6.14 点亮用不上的 walker/RCU/临界区/指针缓存） | 78 |
 | VF 专用 | 5 |
 | 合计 | 115 |
 
-34 项里，点亮路径实际要落地的是第 7 节那 10 步所点名的补丁。其余裸机项（sandbox token、高阶页、userptr 只读、线程记录、GL、descriptor 复用）排在第一帧之后。
+32 项里，点亮路径实际要落地的是第 7 节那 10 步所点名的补丁。其余裸机项（sandbox token、高阶页、userptr 只读、task 引用、GL、descriptor 复用）排在第一帧之后。
