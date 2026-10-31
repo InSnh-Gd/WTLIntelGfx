@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # Compile every drm-kmod source (drm, dmabuf, ttm, i915) for the XNU kernel target with -fsyntax-only and rank what
 # breaks: missing headers first, then the most common first errors. The scoreboard is the X1 progress measure.
-import argparse, collections, concurrent.futures as cf, glob, json, os, re, shlex, subprocess, sys
+import argparse, collections, concurrent.futures as cf, glob, json, os, re, shlex, shutil, subprocess, sys
 
 SRC = os.path.expanduser("~/src/xe-src")
 KMOD = os.path.join(SRC, "drm-kmod")
 LKPI = os.path.join(SRC, "freebsd/sys/compat/linuxkpi")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "xkpi/xe"))
+import build as xe_build
+KMD = os.environ.get("XEGFX_KMD", "i915")
 MODULES = {"drm": "drivers/gpu/drm", "dmabuf": "drivers/dma-buf", "ttm": "drivers/gpu/drm/ttm",
            "i915": "drivers/gpu/drm/i915"}
 
@@ -121,6 +124,8 @@ LKPI_SKIP = ("80211", "usb", "netdev", "skbuff", "mhi", "page_pool", "i2cbb", "h
 
 
 def sources(mod):
+    if mod == "xe":
+        return xe_build.sources(ROOT, SRC, {v.partition("=")[0] for v in kconfig()})
     drop = overlay_exclude()
     return [p for p in _sources(mod) if os.path.basename(p) not in drop] + overlay_sources(mod)
 
@@ -155,6 +160,8 @@ def make_cflags(mod):
     """The module Makefile's own CFLAGS+= lines with its make variables resolved."""
     if mod in ("lkpi", "shim", "kern"):
         return ['-DKBUILD_MODNAME="linuxkpi"', "-DLINUXKPI_PARAM_PREFIX=compat_"]
+    if mod == "xe":
+        return []
     out, kmodname = [], make_list(os.path.join(KMOD, mod, "Makefile"), "KMOD")
     sub = {"${.CURDIR:H}": KMOD, "${SRCDIR:H:H}": os.path.join(KMOD, "drivers"),
            "${SRCDIR}": os.path.join(KMOD, MODULES[mod]), "${KMOD}": kmodname[0] if kmodname else mod}
@@ -196,7 +203,13 @@ def flags(mod):
     if OVERLAY:  # the module Makefiles add drm-kmod's gplv2 include dir themselves; the overlay replaces it
         mk = [x for x in mk if "gplv2" not in x]
         f = ["-I", os.path.join(OVERLAY, "include")] + f
-    return f + kconfig_defines() + mk + [x for i in inc for x in ("-I", i)]
+    result = f + kconfig_defines() + mk + [x for i in inc for x in ("-I", i)]
+    if mod == "xe":
+        # xe's compatibility headers must precede the shared include paths.
+        xf = xe_build.flags(ROOT, SRC)
+        pos = xf.index("-include")
+        result = xf[:pos] + result + xf[pos:] + ["-I", os.path.join(SRC, "linux/include/uapi")]
+    return result
 
 
 OBJ = None
@@ -224,9 +237,17 @@ def licence_gate(jobs):
         for tok in open(d).read().replace("\\\n", " ").split()[1:]:
             if tok.endswith((".h", ".c")):
                 files.add(os.path.normpath(tok))
-    bad = sorted(f for f in files if gpl_only(f))
+    allow = set()
+    if KMD == "xe":
+        with open(os.path.join(ROOT, "xkpi/xe/gpl-allow.txt")) as f:
+            allow = {l.split("#")[0].strip() for l in f if l.split("#")[0].strip()}
+    def allowed(path):
+        norm = path.replace(os.path.join(ROOT, "out/xe-src"), "drivers/gpu/drm/xe")
+        return any(norm.endswith("/" + p) or norm == p for p in allow)
+    gpl = sorted(f for f in files if gpl_only(f))
+    bad = [f for f in gpl if not allowed(f)]
     with open(os.path.join(ROOT, "out", "licence.txt"), "w") as f:
-        f.write("\n".join(bad) + ("\n" if bad else ""))
+        f.write("".join(p + (" allowed (owner policy)" if allowed(p) else "") + "\n" for p in gpl))
     return bad
 
 
@@ -259,11 +280,19 @@ def ensure_links():
 def main():
     ensure_links()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mods", default="shim,kern,lkpi,drm,dmabuf,ttm,i915")
+    ap.add_argument("--mods", default="shim,kern,lkpi,drm,dmabuf,ttm," + KMD)
     ap.add_argument("--obj", action="store_true", help="build objects in out/obj and list undefined symbols")
     ap.add_argument("--one", help="compile one shim source (shim flags, all errors shown) into out/one/; for parallel work")
     ap.add_argument("--json", default=os.path.join(ROOT, "out/score.json"))
     a = ap.parse_args()
+    if KMD not in ("i915", "xe"):
+        ap.error("XEGFX_KMD must be i915 or xe")
+    mods = a.mods.split(",")
+    if any(m in mods and m != KMD for m in ("i915", "xe")):
+        ap.error("--mods must contain only the selected XEGFX_KMD")
+    os.makedirs(os.path.join(ROOT, "out"), exist_ok=True)
+    if "xe" in mods:
+        xe_build.prepare(ROOT, SRC)
     if a.one:
         src = os.path.abspath(a.one)
         o = os.path.join(ROOT, "out/one", os.path.basename(src) + ".o")
@@ -283,12 +312,17 @@ def main():
     global OBJ
     if a.obj:
         OBJ = os.path.join(ROOT, "out/obj")
+        shutil.rmtree(os.path.join(OBJ, "xe" if KMD == "i915" else "i915"), ignore_errors=True)
+        # Discard stale selected-driver objects too, including sources removed from its list.
+        shutil.rmtree(os.path.join(OBJ, KMD), ignore_errors=True)
+    with open(os.path.join(ROOT, "out/kmd.txt"), "w") as f:
+        f.write(KMD + "\n")
     jobs = [(m, p) for m in a.mods.split(",") for p in sources(m)]
     with cf.ThreadPoolExecutor(max_workers=os.cpu_count()) as ex:
         res = list(ex.map(compile_one, jobs))
     if OBJ:
         bad = licence_gate(jobs)
-        print(f"licence gate: {len(bad)} GPL-only files compiled or included (out/licence.txt)")
+        print(f"licence gate: {len(bad)} unapproved GPL-only files compiled or included (out/licence.txt)")
         if bad and OVERLAY:
             print("\n".join("  " + b for b in bad[:40]))
             return 2

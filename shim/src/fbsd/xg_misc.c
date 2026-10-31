@@ -1388,9 +1388,10 @@ firmware_get_flags(const char *imagename, uint32_t flags)
 	int error;
 
 	xg_misc_init();
-	/* Resources is flat; LinuxKPI retries a path as its basename and with '/' flattened, so skip the round trip */
-	if (strchr(imagename, '/') != NULL)
-		return (NULL);
+	/* Resources and the embedded table are flat (e.g. xe/ptl_guc_70.bin). */
+	name = strrchr(imagename, '/');
+	if (name != NULL)
+		imagename = name + 1;
 	sx_xlock(&xg_fw_lock);
 	LIST_FOREACH(f, &xg_fws, link)
 		if (strcmp(f->fw.name, imagename) == 0) {

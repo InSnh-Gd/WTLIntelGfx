@@ -1,0 +1,15 @@
+# Explicit GPL-only xe inputs permitted by owner policy; xe build only.
+drivers/gpu/drm/xe/xe_pt_walk.c
+drivers/gpu/drm/xe/xe_pt_walk.h
+drivers/gpu/drm/xe/xe_res_cursor.h
+drivers/gpu/drm/xe/xe_trace.c
+drivers/gpu/drm/xe/xe_trace.h
+drivers/gpu/drm/xe/xe_trace_bo.c
+drivers/gpu/drm/xe/xe_trace_bo.h
+drivers/gpu/drm/xe/xe_trace_guc.c
+drivers/gpu/drm/xe/xe_trace_guc.h
+drivers/gpu/drm/xe/xe_trace_lrc.c
+drivers/gpu/drm/xe/xe_trace_lrc.h
+drivers/gpu/drm/xe/xe_vsec.c
+drivers/gpu/drm/xe/xe_vsec.h
+include/drm/drm_gem_ttm_helper.h

@@ -4,6 +4,8 @@
 set -euo pipefail
 R="$(cd "$(dirname "$0")/.." && pwd)"; X="$R"
 export XEGFX_OVERLAY="$R/xkpi"
+export XEGFX_KMD="${XEGFX_KMD:-i915}"
+mkdir -p "$X/out"
 python3 "$X/harness/score.py" --obj > "$X/out/score.log" 2>&1 || { tail -20 "$X/out/score.log"; exit 1; }
 # a source that did not compile would be linked as panicking stubs (N-223 died in one), so stop here instead
 read -r ok all < <(sed -nE 's/^total +([0-9]+)\/ *([0-9]+).*/\1 \2/p' "$X/out/score.log")

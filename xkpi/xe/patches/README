@@ -1,0 +1,3 @@
+The harness applies *.patch in lexical order with patch -p1 after fork_xe.py,
+in the freshly copied out/xe-src tree. The caller's 0100-0157 series is documented
+in docs/xe-ptl-patches.md.

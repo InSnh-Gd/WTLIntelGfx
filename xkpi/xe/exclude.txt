@@ -1,0 +1,7 @@
+xe_module.c                 # replaced by src/xg_xe_module.c: Linux module entry is not SYSINIT
+xe_trace.c                  # ftrace absent; include/xe_trace*.h provides no-op tracepoints
+xe_trace_bo.c               # ftrace absent
+xe_trace_guc.c              # ftrace absent
+xe_trace_lrc.c              # ftrace absent
+xe_vsec.c                   # Linux intel_vsec PMT telemetry has no macOS provider
+intel_display_trace.c       # ftrace absent; not present in drm-kmod's display tree

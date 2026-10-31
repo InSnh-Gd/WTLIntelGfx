@@ -3,6 +3,19 @@
 # linkcheck on it.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+KMD=${XEGFX_KMD:-$(cat "$ROOT/out/kmd.txt" 2>/dev/null || echo i915)}
+case "$KMD" in
+  i915) KMD_FLAGS=(); FW_IMAGE=mtl_guc_70.bin; FW_LICENSE=LICENSE.i915 ;;
+  xe) KMD_FLAGS=(-DXEGFX_KMD_XE=1); FW_IMAGE=xe/ptl_guc_70.bin; FW_LICENSE=LICENSE.xe ;;
+  *) echo "STOP: XEGFX_KMD must be i915 or xe"; exit 1 ;;
+esac
+if [ -f "$ROOT/out/kmd.txt" ] && [ "$(cat "$ROOT/out/kmd.txt")" != "$KMD" ]; then
+  echo "STOP: XEGFX_KMD differs from out/kmd.txt; rebuild objects first"; exit 1
+fi
+OTHER_KMD=i915; [ "$KMD" = i915 ] && OTHER_KMD=xe
+if [ -d "$ROOT/out/obj/$OTHER_KMD" ]; then
+  echo "STOP: objects for both KMDs present; rebuild objects first"; exit 1
+fi
 SDK=${SDKROOT:-/Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk}
 K="$SDK/System/Library/Frameworks/Kernel.framework/Headers"
 O="$ROOT/out/link"; rm -rf "$O"; mkdir -p "$O"
@@ -14,17 +27,17 @@ xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -mkernel -ffreestanding -nost
 for cpp in "$ROOT"/shim/src/xnu/*.cpp; do
   xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -mkernel -nostdinc -isysroot "$SDK" -I"$K" \
     -I"$ROOT/shim/include" -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT -std=c++17 -fno-rtti -fno-exceptions \
-    -O2 -Wall -Wno-inconsistent-missing-override -Wno-deprecated-declarations -c "$cpp" -o "$O/$(basename "$cpp").o"
+    "${KMD_FLAGS[@]}" -O2 -Wall -Wno-inconsistent-missing-override -Wno-deprecated-declarations -c "$cpp" -o "$O/$(basename "$cpp").o"
 done
 # firmware linked into the binary, so no daemon round trip is needed (empty table without linux-firmware)
 FW=${XEGFX_FW:-$HOME/src/xe-src/linux-firmware}
-FWS="mtl_guc_70.bin"
+FWS="$FW_IMAGE"
 { printf '.section __DATA,__const\n.p2align 3\n.globl _xg_fw_embedded\n_xg_fw_embedded:\n'
   i=0; for f in $FWS; do [ -f "$FW/$f" ] || continue
     printf '.quad n%d, d%d, e%d - d%d\n' $i $i $i $i; i=$((i+1)); done
   printf '.quad 0, 0, 0\n'
   i=0; for f in $FWS; do [ -f "$FW/$f" ] || continue
-    printf 'n%d: .asciz "%s"\n.p2align 4\nd%d: .incbin "%s"\ne%d:\n' $i "$f" $i "$FW/$f" $i; i=$((i+1)); done
+    printf 'n%d: .asciz "%s"\n.p2align 4\nd%d: .incbin "%s"\ne%d:\n' $i "${f##*/}" $i "$FW/$f" $i; i=$((i+1)); done
 } > "$O/xg_fwblob.S"
 xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -c "$O/xg_fwblob.S" -o "$O/xg_fwblob.o"
 B="$ROOT/out/XeGfx.kext/Contents"; rm -rf "$ROOT/out/XeGfx.kext"; mkdir -p "$B/MacOS"
@@ -34,10 +47,10 @@ xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xli
   grep -E 'Undefined|duplicate|error' "$O/ld.txt" | head -40; exit 1; }
 cp "$ROOT/kext/Info.plist" "$B/Info.plist"
 # GuC only for now: HuC and GSC need MEI (none on macOS), DMC only matters once i915 owns the display.
-# Blobs come from linux-firmware (LICENSE.i915, redistributable) and are not in this repo.
-if [ -f "$FW/mtl_guc_70.bin" ]; then
+# Blobs come from linux-firmware (LICENSE.i915 or LICENSE.xe) and are not in this repo.
+if [ -f "$FW/$FW_IMAGE" ]; then
   mkdir -p "$B/Resources"
-  cp "$FW/mtl_guc_70.bin" "$FW/LICENSE.i915" "$B/Resources/"
+  cp "$FW/$FW_IMAGE" "$FW/$FW_LICENSE" "$B/Resources/"
 fi
 codesign -s - -f "$ROOT/out/XeGfx.kext" >/dev/null 2>&1 || true
 echo "XeGfx.kext $(stat -f %z "$B/MacOS/XeGfx") B"
