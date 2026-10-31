@@ -1,0 +1,33 @@
+Purpose: avoid Wa_14025515070 by disabling indirect ring state on PTL.
+Source: docs/panther-lake-xe-port-plan.md section 6, Milestone 1 B0 WAs;
+  Linux f9a21696e37b (GuC ADS KLV 0x900e mitigation, v7.2; exact subject
+  unavailable locally) is the upstream alternative recorded by that plan.
+Adaptation for 6.14: use the requested conservative feature disable instead
+  of importing KLV 0x900e. Set the per-GT flag for both primary and media GTs
+  during xe_info_init, before any LRC allocation. Do not change the shared
+  Xe2 graphics/media descriptors or any other platform.
+
+--- a/xe_pci.c
++++ b/xe_pci.c
+@@ -736,7 +736,9 @@
+ 		gt = tile->primary_gt;
+ 		gt->info.id = xe->info.gt_count++;
+ 		gt->info.type = XE_GT_TYPE_MAIN;
+-		gt->info.has_indirect_ring_state = graphics_desc->has_indirect_ring_state;
++		/* Wa_14025515070: M1 port plan uses direct ring state on PTL. */
++		gt->info.has_indirect_ring_state = xe->info.platform == XE_PANTHERLAKE ?
++			0 : graphics_desc->has_indirect_ring_state;
+ 		gt->info.engine_mask = graphics_desc->hw_engine_mask;
+ 
+ 		if (MEDIA_VER(xe) < 13 && media_desc)
+@@ -755,7 +757,9 @@
+ 
+ 		gt = tile->media_gt;
+ 		gt->info.type = XE_GT_TYPE_MEDIA;
+-		gt->info.has_indirect_ring_state = media_desc->has_indirect_ring_state;
++		/* Wa_14025515070: M1 port plan uses direct ring state on PTL. */
++		gt->info.has_indirect_ring_state = xe->info.platform == XE_PANTHERLAKE ?
++			0 : media_desc->has_indirect_ring_state;
+ 		gt->info.engine_mask = media_desc->hw_engine_mask;
+ 
+ 		/*

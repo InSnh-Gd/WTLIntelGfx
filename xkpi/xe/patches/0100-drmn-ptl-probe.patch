@@ -1,0 +1,26 @@
+Purpose: attach xe to LinuxKPI vgapci and allow Panther Lake probe.
+Source: vibe-nullmoth-xe3-qemu @ 7246d38
+  patches/xkpi/0006-xe-name-the-PCI-driver-drmn-so-LinuxKPI-registers-it.patch.
+Adaptation for 6.14: edit xe_pci.c directly after fork_xe.py, and remove
+  ptl_desc.require_force_probe as required by Milestone 1 step 2 of
+  docs/panther-lake-xe-port-plan.md. Leave has_sriov at its default (false).
+
+--- a/xe_pci.c
++++ b/xe_pci.c
+@@ -349,7 +349,6 @@
+ static const struct xe_device_desc ptl_desc = {
+ 	PLATFORM(PANTHERLAKE),
+ 	.has_display = true,
+-	.require_force_probe = true,
+ };
+ 
+ #undef PLATFORM
+@@ -1034,7 +1033,7 @@
+ #endif
+ 
+ static struct pci_driver xe_pci_driver = {
+-	.name = DRIVER_NAME,
++	.name = "drmn",
+ 	.id_table = pciidlist,
+ 	.probe = xe_pci_probe,
+ 	.remove = xe_pci_remove,

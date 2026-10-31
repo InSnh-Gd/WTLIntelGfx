@@ -1,0 +1,18 @@
+Purpose: select xe/ptl_guc_70.bin with wanted version 70.54.0 on both GTs.
+Source: NullMoth nvidia-macos-driver d96eaca gpu-port/xkpi/fork_xe.py.
+Adaptation for 6.14: use the two-argument fw_def macro (no GT_TYPE_ANY),
+  insert PTL first in the newest-platform-first GuC list, and raise the
+  wanted version from NullMoth's 70.29.2 to 70.54.0 per the port plan.
+  Intentionally omit PTL HuC and GSC entries. The shipped GuC is 70.72.1.
+  In 6.14 this wanted minor version is advisory, not a hard rejection floor.
+
+--- a/xe_uc_fw.c
++++ b/xe_uc_fw.c
+@@ -107,6 +107,7 @@
+ };
+ 
+ #define XE_GUC_FIRMWARE_DEFS(fw_def, mmp_ver, major_ver)			\
++	fw_def(PANTHERLAKE,	major_ver(xe,	guc,	ptl,	70, 54, 0))	\
+ 	fw_def(BATTLEMAGE,	major_ver(xe,	guc,	bmg,	70, 29, 2))	\
+ 	fw_def(LUNARLAKE,	major_ver(xe,	guc,	lnl,	70, 29, 2))	\
+ 	fw_def(METEORLAKE,	major_ver(i915,	guc,	mtl,	70, 29, 2))	\

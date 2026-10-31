@@ -1,0 +1,48 @@
+Purpose: match exactly the 13 current mainline Panther Lake PCI IDs.
+Source: Linux 36aad21d50d1, include/drm/intel/pciids.h INTEL_PTL_IDS,
+  as recorded in docs/panther-lake-xe-port-plan.md section 4.
+  History recorded there: 16016ade13f6 removes pre-production IDs (v6.15),
+  aee2d33da882 restores B0A1 (September 2026). Exact subjects and the
+  B083-B087/B08F addition commit could not be verified offline.
+Adaptation for 6.14: use a local XG_PTL_IDS macro because pciids.h is outside
+  the patch root. Replace the sole INTEL_PTL_IDS consumer in xe. Add
+  B083-B087/B08F; drop B091/B092/B0A2; retain B0A1. No WCL IDs.
+
+--- a/xe_pci.c
++++ b/xe_pci.c
+@@ -372,6 +372,26 @@
+ 	{ 2000, &media_xe2 },
+ 	{ 3000, &media_xe2 },
+ };
++
++/*
++ * Mainline include/drm/intel/pciids.h INTEL_PTL_IDS (36aad21d50d1).
++ * Linux 6.17+ IDs plus B0A1 restored by aee2d33da882; 16016ade13f6
++ * removed pre-production IDs. Keep this local to the xe 6.14 backport.
++ */
++#define XG_PTL_IDS(MACRO__, ...) \
++	MACRO__(0xB080, ## __VA_ARGS__), \
++	MACRO__(0xB081, ## __VA_ARGS__), \
++	MACRO__(0xB082, ## __VA_ARGS__), \
++	MACRO__(0xB083, ## __VA_ARGS__), \
++	MACRO__(0xB084, ## __VA_ARGS__), \
++	MACRO__(0xB085, ## __VA_ARGS__), \
++	MACRO__(0xB086, ## __VA_ARGS__), \
++	MACRO__(0xB087, ## __VA_ARGS__), \
++	MACRO__(0xB08F, ## __VA_ARGS__), \
++	MACRO__(0xB090, ## __VA_ARGS__), \
++	MACRO__(0xB0A0, ## __VA_ARGS__), \
++	MACRO__(0xB0A1, ## __VA_ARGS__), \
++	MACRO__(0xB0B0, ## __VA_ARGS__)
+ 
+ /*
+  * Make sure any device matches here are from most specific to most
+@@ -395,7 +415,7 @@
+ 	INTEL_MTL_IDS(INTEL_VGA_DEVICE, &mtl_desc),
+ 	INTEL_LNL_IDS(INTEL_VGA_DEVICE, &lnl_desc),
+ 	INTEL_BMG_IDS(INTEL_VGA_DEVICE, &bmg_desc),
+-	INTEL_PTL_IDS(INTEL_VGA_DEVICE, &ptl_desc),
++	XG_PTL_IDS(INTEL_VGA_DEVICE, &ptl_desc),
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(pci, pciidlist);

@@ -1,0 +1,30 @@
+Purpose: retain runtime PM references and allow GuC G2H processing on LinuxKPI.
+Source: vibe-nullmoth-xe3-qemu @ 7246d38
+  patches/xkpi/0011-xe-runtime-PM-get_if_active-in_use-always-succeed-Li.patch.
+Adaptation for 6.14: change xe_pm.c directly after fork_xe.py. Preserve the
+  xe_pm_read_callback_task checks and their existing reference semantics.
+
+--- a/xe_pm.c
++++ b/xe_pm.c
+@@ -588,7 +588,9 @@
+  */
+ bool xe_pm_runtime_get_if_active(struct xe_device *xe)
+ {
+-	return pm_runtime_get_if_active(xe->drm.dev) > 0;
++	/* LinuxKPI has no runtime PM state; the device is always active. */
++	pm_runtime_get_noresume(xe->drm.dev);
++	return true;
+ }
+ 
+ /**
+@@ -606,7 +608,9 @@
+ 		return true;
+ 	}
+ 
+-	return pm_runtime_get_if_in_use(xe->drm.dev) > 0;
++	/* LinuxKPI has no runtime PM state; the device is always active. */
++	pm_runtime_get_noresume(xe->drm.dev);
++	return true;
+ }
+ 
+ /*
