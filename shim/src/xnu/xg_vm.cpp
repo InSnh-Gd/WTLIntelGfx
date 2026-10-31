@@ -6,6 +6,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IOMultiMemoryDescriptor.h>
 #include <mach/vm_param.h>
 #include "xg_vm_xnu.h"
 #include <libkern/OSAtomic.h>
@@ -98,6 +99,41 @@ xg_vm_x_map_phys(unsigned long long pa, unsigned long long size, int cache, void
 	return xg_vm_xnew(md, map);
 }
 
+/*
+ * One physical descriptor per range, joined back to back by an IOMultiMemoryDescriptor. A single multi-range
+ * kIOMemoryTypePhysical64 descriptor maps only its first range: vibe-nullmoth-xe3-qemu found xe's LRC copy
+ * (xe_lrc_init) faulting on the first page past the first physically contiguous run of a 9-page BO.
+ * Ported from vibe-nullmoth-xe3-qemu @ 7246d38 patches/xkpi/0012-xnu-map-page-arrays-through-one-descriptor-per-physi.patch
+ * (nmx_xnu_map_pages); here it serves xg_vm_map_ranges (vmap, user maps) and xg_vm_x_map_at (pmap_qenter).
+ */
+static IOMemoryDescriptor *
+xg_vm_phys_md(IOAddressRange *r, unsigned int n)
+{
+	IOMemoryDescriptor **parts, *md = nullptr;
+	unsigned int made;
+
+	if (n == 0)
+		return nullptr;
+	if (n == 1)
+		return IOMemoryDescriptor::withAddressRanges(r, 1, kIODirectionInOut | kIOMemoryTypePhysical64 |
+		    kIOMemoryMapperNone, nullptr);
+	if ((parts = (IOMemoryDescriptor **)IOMalloc(n * sizeof(*parts))) == nullptr)
+		return nullptr;
+	for (made = 0; made < n; made++) {
+		parts[made] = IOMemoryDescriptor::withAddressRanges(&r[made], 1, kIODirectionInOut |
+		    kIOMemoryTypePhysical64 | kIOMemoryMapperNone, nullptr);
+		if (parts[made] == nullptr)
+			break;
+	}
+	if (made == n)
+		md = IOMultiMemoryDescriptor::withDescriptors(parts, n, kIODirectionInOut, false);
+	/* the multi descriptor retains its parts */
+	for (unsigned int i = 0; i < made; i++)
+		parts[i]->release();
+	IOFree(parts, n * sizeof(*parts));
+	return md;
+}
+
 static xg_vm_xmem_t
 xg_vm_map_ranges(task_t task, const unsigned long long *pa, const unsigned long long *len, unsigned int n, int cache,
     int writable, unsigned long long *addr);
@@ -138,8 +174,7 @@ xg_vm_map_ranges(task_t task, const unsigned long long *pa, const unsigned long 
 		r[i].length = len[i];
 		size += len[i];
 	}
-	md = IOMemoryDescriptor::withAddressRanges(r, n, kIODirectionInOut | kIOMemoryTypePhysical64 |
-	    kIOMemoryMapperNone, nullptr);
+	md = xg_vm_phys_md(r, n);
 	IOFree(r, n * sizeof(*r));
 	if (md == nullptr)
 		return nullptr;
@@ -196,8 +231,7 @@ xg_vm_x_map_at(xg_vm_xmem_t resv, void *va, const unsigned long long *pa, unsign
 		r[nr].length = PAGE_SIZE;
 		nr++;
 	}
-	md = IOMemoryDescriptor::withAddressRanges(r, nr, kIODirectionInOut | kIOMemoryTypePhysical64 |
-	    kIOMemoryMapperNone, nullptr);
+	md = xg_vm_phys_md(r, nr);
 	IOFree(r, sizeof(*r) * n);
 	if (md == nullptr)
 		return nullptr;

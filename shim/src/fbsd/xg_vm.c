@@ -1595,6 +1595,51 @@ xg_vm_vunmap(void *va)
 	return (0);
 }
 
+/*
+ * Panther Lake plan step 5: a vmap whose pages are NOT physically adjacent. xe vmaps BOs page by page (LRC, GuC ADS,
+ * ring), and a multi-range physical descriptor that maps only its first run (vibe-nullmoth-xe3-qemu 0012) shows up
+ * here as the later pages aliasing the wrong memory or faulting. Pages 4, 0 and 2 of a 5-page contiguous block are
+ * mapped in that order, so every boundary in the mapping is a physical gap and one step goes backwards.
+ */
+static int
+xg_vm_vmap_selftest_sparse(void)
+{
+	static const int order[3] = { 4, 0, 2 };
+	unsigned long long pa[3];
+	volatile uint32_t *a, *b = NULL;
+	int rc = 0, i;
+
+	a = contigmalloc(5 * PAGE_SIZE, M_XGVM, M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, PAGE_SIZE, 0);
+	if (a == NULL)
+		return (-11);
+	for (i = 0; i < 3; i++)
+		if ((pa[i] = pmap_kextract((vm_offset_t)a + ptoa(order[i]))) == 0)
+			rc = -12;
+	for (i = 0; rc == 0 && i < 5; i++)
+		a[ptoa(i) / 4 + 7] = 0x58670100 + (uint32_t)i;
+	if (rc == 0 && (b = xg_vm_vmap_pa(pa, 3, VM_MEMATTR_WRITE_BACK)) == NULL)
+		rc = -13;
+	if (rc == 0) {
+		/* reads through the new mapping see each source page in mapping order */
+		for (i = 0; i < 3; i++)
+			if (b[ptoa(i) / 4 + 7] != 0x58670100 + (uint32_t)order[i])
+				rc = rc ? rc : -20 - i;
+		/* writes land in the right source page, and the skipped pages 1 and 3 stay untouched */
+		for (i = 0; i < 3; i++)
+			b[ptoa(i) / 4 + 9] = 0x58670200 + (uint32_t)i;
+		for (i = 0; i < 3; i++)
+			if (a[ptoa(order[i]) / 4 + 9] != 0x58670200 + (uint32_t)i)
+				rc = rc ? rc : -30 - i;
+		if (a[ptoa(1) / 4 + 9] != 0 || a[ptoa(3) / 4 + 9] != 0)
+			rc = rc ? rc : -14;
+		if (xg_vm_vunmap((void *)(uintptr_t)b) != 0)
+			rc = rc ? rc : -15;
+	}
+	contigfree((void *)(uintptr_t)a, 5 * PAGE_SIZE, M_XGVM);
+	printf("xegfx: vm: vmap sparse selftest %d\n", rc);
+	return (rc);
+}
+
 /* stage 1 runs this before any GPU work: 0, or the negative step that failed (no panic) */
 int
 xg_vm_vmap_selftest(void)
@@ -1621,6 +1666,8 @@ xg_vm_vmap_selftest(void)
 			rc = rc ? rc : -5;
 	}
 	contigfree((void *)(uintptr_t)a, 2 * PAGE_SIZE, M_XGVM);
+	if (rc == 0)
+		rc = xg_vm_vmap_selftest_sparse();
 	printf("xegfx: vm: vmap selftest %d\n", rc);
 	return (rc);
 }
