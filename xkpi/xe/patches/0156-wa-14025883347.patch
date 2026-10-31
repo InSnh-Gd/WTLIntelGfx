@@ -1,0 +1,99 @@
+Purpose: finish GuC idle/SRAM handling before GuC-only reset to avoid DMA failure.
+Source: Linux c57db41b8d2cd410e7219729f446aa17965485ad
+  "drm/xe/guc: Add Wa_14025883347 for GuC DMA failure on reset".
+Adaptation for 6.14: replace newer XE_GT_WA by existing XE_WA. Keep the
+  helper's boot-valid/MIA-reset guards, idle-flow disable, 100 ms ready wait,
+  5 ms SRAM wait, timeout warnings, and call after the VF early return with
+  GT forcewake held. Existing xe_mmio APIs and GuC ready status suffice.
+  Preserve upstream graphics/media ranges and all-step coverage.
+
+--- a/regs/xe_guc_regs.h
++++ b/regs/xe_guc_regs.h
+@@ -39,6 +39,9 @@
+ #define   GS_BOOTROM_RSA_FAILED			REG_FIELD_PREP(GS_BOOTROM_MASK, 0x50)
+ #define   GS_BOOTROM_JUMP_PASSED		REG_FIELD_PREP(GS_BOOTROM_MASK, 0x76)
+ #define   GS_MIA_IN_RESET			REG_BIT(0)
++
++#define BOOT_HASH_CHK				XE_REG(0xc010)
++#define   GUC_BOOT_UKERNEL_VALID		REG_BIT(31)
+ 
+ #define GUC_HEADER_INFO				XE_REG(0xc014)
+ 
+@@ -83,7 +86,12 @@
+ #define   GUC_WOPCM_OFFSET_MASK			REG_GENMASK(31, GUC_WOPCM_OFFSET_SHIFT)
+ #define   HUC_LOADING_AGENT_GUC			REG_BIT(1)
+ #define   GUC_WOPCM_OFFSET_VALID		REG_BIT(0)
++
++#define GUC_SRAM_STATUS				XE_REG(0xc398)
++#define   GUC_SRAM_HANDLING_MASK		REG_GENMASK(8, 7)
++
+ #define GUC_MAX_IDLE_COUNT			XE_REG(0xc3e4)
++#define   GUC_IDLE_FLOW_DISABLE			REG_BIT(31)
+ #define GUC_PMTIMESTAMP_LO			XE_REG(0xc3e8)
+ #define GUC_PMTIMESTAMP_HI			XE_REG(0xc3ec)
+ 
+--- a/xe_guc.c
++++ b/xe_guc.c
+@@ -763,6 +763,41 @@
+ 	return 0;
+ }
+ 
++/*
++ * Wa_14025883347: Prevent GuC firmware DMA failures during GuC-only reset by ensuring
++ * SRAM save/restore operations are complete before reset.
++ */
++static void guc_prevent_fw_dma_failure_on_reset(struct xe_guc *guc)
++{
++	struct xe_gt *gt = guc_to_gt(guc);
++	u32 boot_hash_chk, guc_status, sram_status;
++	int ret;
++
++	guc_status = xe_mmio_read32(&gt->mmio, GUC_STATUS);
++	if (guc_status & GS_MIA_IN_RESET)
++		return;
++
++	boot_hash_chk = xe_mmio_read32(&gt->mmio, BOOT_HASH_CHK);
++	if (!(boot_hash_chk & GUC_BOOT_UKERNEL_VALID))
++		return;
++
++	/* Disable idle flow during reset (GuC reset re-enables it automatically) */
++	xe_mmio_rmw32(&gt->mmio, GUC_MAX_IDLE_COUNT, 0, GUC_IDLE_FLOW_DISABLE);
++
++	ret = xe_mmio_wait32(&gt->mmio, GUC_STATUS, GS_UKERNEL_MASK,
++			     FIELD_PREP(GS_UKERNEL_MASK, XE_GUC_LOAD_STATUS_READY),
++			     100000, &guc_status, false);
++	if (ret)
++		xe_gt_warn(gt, "GuC not ready after disabling idle flow (GUC_STATUS: 0x%x)\n",
++			   guc_status);
++
++	ret = xe_mmio_wait32(&gt->mmio, GUC_SRAM_STATUS, GUC_SRAM_HANDLING_MASK,
++			     0, 5000, &sram_status, false);
++	if (ret)
++		xe_gt_warn(gt, "SRAM handling not complete (GUC_SRAM_STATUS: 0x%x)\n",
++			   sram_status);
++}
++
+ int xe_guc_reset(struct xe_guc *guc)
+ {
+ 	struct xe_gt *gt = guc_to_gt(guc);
+@@ -774,6 +809,9 @@
+ 
+ 	if (IS_SRIOV_VF(gt_to_xe(gt)))
+ 		return xe_gt_sriov_vf_bootstrap(gt);
++
++	if (XE_WA(gt, 14025883347))
++		guc_prevent_fw_dma_failure_on_reset(guc);
+ 
+ 	xe_mmio_write32(mmio, GDRST, GRDOM_GUC);
+ 
+--- a/xe_wa_oob.rules
++++ b/xe_wa_oob.rules
+@@ -42,6 +42,8 @@
+ 14019789679	GRAPHICS_VERSION(1255)
+ 		GRAPHICS_VERSION_RANGE(1270, 2004)
+ no_media_l3	MEDIA_VERSION(3000)
++14025883347	MEDIA_VERSION_RANGE(1301, 3503)
++		GRAPHICS_VERSION_RANGE(2004, 3005)
+ 16026007364	MEDIA_VERSION(3000)
+ 16023105232	GRAPHICS_VERSION_RANGE(2001, 3001)
+ 		MEDIA_VERSION_RANGE(1301, 3000)

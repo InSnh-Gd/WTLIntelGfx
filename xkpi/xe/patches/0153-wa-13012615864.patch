@@ -1,0 +1,32 @@
+Purpose: set TDL_TSL_CHICKEN RES_CHK_SPR_DIS bit 6 on Xe3 LPG.
+Source: Linux 2399bcc07c01189737858e0a88ac4ffdd1d4b03d
+  "drm/xe/xe3lpg: Add Wa_13012615864".
+Adaptation for 6.14: reuse TDL_TSL_CHICKEN's masked MCR definition and the
+  existing first-render-or-compute FUNC helper; append the engine entry
+  before the sentinel. Preserve graphics 30.00-30.01 and all steppings.
+
+--- a/regs/xe_gt_regs.h
++++ b/regs/xe_gt_regs.h
+@@ -475,6 +475,7 @@
+ #define TDL_TSL_CHICKEN				XE_REG_MCR(0xe4c4, XE_REG_OPTION_MASKED)
+ #define   STK_ID_RESTRICT			REG_BIT(12)
+ #define   SLM_WMTP_RESTORE			REG_BIT(11)
++#define   RES_CHK_SPR_DIS			REG_BIT(6)
+ 
+ #define ROW_CHICKEN				XE_REG_MCR(0xe4f0, XE_REG_OPTION_MASKED)
+ #define   UGM_BACKUP_MODE			REG_BIT(13)
+--- a/xe_wa.c
++++ b/xe_wa.c
+@@ -635,6 +635,12 @@
+ 	  XE_RTP_ACTIONS(SET(TDL_CHICKEN, QID_WAIT_FOR_THREAD_NOT_RUN_DISABLE))
+ 	},
+ 
++	{ XE_RTP_NAME("13012615864"),
++	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(3000, 3001),
++		       FUNC(xe_rtp_match_first_render_or_compute)),
++	  XE_RTP_ACTIONS(SET(TDL_TSL_CHICKEN, RES_CHK_SPR_DIS))
++	},
++
+ 	{}
+ };
+ 

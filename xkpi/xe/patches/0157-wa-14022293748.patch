@@ -1,0 +1,18 @@
+Purpose: enable GuC back-to-back RCS reset workaround KLV 0x9009 on PTL.
+Source: Linux 32af900f2c6b1846fd3ede8ad36dd180d7e4ae70
+  "drm/xe/xe3lpg: Apply Wa_14022293748, Wa_22019794406".
+Adaptation for 6.14: extend only Wa_14022293748 to graphics 30.00-30.01,
+  all steppings. The base KLV 0x9009, simple ADS helper, and OR condition
+  with Wa_22019794406 already exist. Leave Wa_22019794406 unchanged as
+  requested; the selected WA independently enables the shared KLV.
+
+--- a/xe_wa_oob.rules
++++ b/xe_wa_oob.rules
+@@ -32,6 +32,7 @@
+ 		GRAPHICS_VERSION(3003)
+ 14022293748	GRAPHICS_VERSION(2001)
+ 		GRAPHICS_VERSION(2004)
++		GRAPHICS_VERSION_RANGE(3000, 3001)
+ 22019794406	GRAPHICS_VERSION(2001)
+ 		GRAPHICS_VERSION(2004)
+ 22019338487	MEDIA_VERSION(2000)

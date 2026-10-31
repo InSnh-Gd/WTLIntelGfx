@@ -1,0 +1,19 @@
+Purpose: enable existing GuC KLV 0x9008 for PTL graphics 30.00-30.01.
+Source: Linux 6fc957185e1691bb6dfa4193698a229db537c2a2
+  "drm/xe: Extend Wa_13011645652 to PTL-H, WCL".
+Adaptation for 6.14: the base rule, ABI key, one-word ADS helper, and 0xC40
+  payload already exist. Add the upstream 3000-3001 range directly (6.14
+  lacks even the 3001-only rule); keep upstream's dormant 3003 extension.
+  No base infrastructure backport or original-base-commit lookup needed.
+
+--- a/xe_wa_oob.rules
++++ b/xe_wa_oob.rules
+@@ -28,6 +28,8 @@
+ 16022287689	GRAPHICS_VERSION(2001)
+ 		GRAPHICS_VERSION(2004)
+ 13011645652	GRAPHICS_VERSION(2004)
++		GRAPHICS_VERSION_RANGE(3000, 3001)
++		GRAPHICS_VERSION(3003)
+ 14022293748	GRAPHICS_VERSION(2001)
+ 		GRAPHICS_VERSION(2004)
+ 22019794406	GRAPHICS_VERSION(2001)

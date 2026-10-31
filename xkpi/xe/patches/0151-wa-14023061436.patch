@@ -1,0 +1,35 @@
+Purpose: enable WMTP for the BTD kernel with TDL_CHICKEN bit 12.
+Source: Linux 92029e0baa5313ba208103f90086f59070bbf93b
+  "drm/xe/ptl: Apply Wa_14023061436".
+Adaptation for 6.14: insert into engine_was before its sentinel; existing
+  GRAPHICS_VERSION_RANGE and first-render-or-compute FUNC helpers suffice.
+  Keep masked MCR register semantics and graphics 30.00-30.01, all steps.
+  The first RCS/CCS programs the shared register for that reset domain.
+
+--- a/regs/xe_gt_regs.h
++++ b/regs/xe_gt_regs.h
+@@ -500,6 +500,9 @@
+ #define   LSC_L1_FLUSH_CTL_3D_DATAPORT_FLUSH_EVENTS_MASK	REG_GENMASK(13, 11)
+ #define   DIS_ATOMIC_CHAINING_TYPED_WRITES	REG_BIT(3)
+ 
++#define TDL_CHICKEN				XE_REG_MCR(0xe5f4, XE_REG_OPTION_MASKED)
++#define   QID_WAIT_FOR_THREAD_NOT_RUN_DISABLE	REG_BIT(12)
++
+ #define LSC_CHICKEN_BIT_0			XE_REG_MCR(0xe7c8)
+ #define   DISABLE_D8_D16_COASLESCE		REG_BIT(30)
+ #define   WR_REQ_CHAINING_DIS			REG_BIT(26)
+--- a/xe_wa.c
++++ b/xe_wa.c
+@@ -621,6 +621,12 @@
+ 			     XE_RTP_ACTION_FLAG(ENGINE_BASE)))
+ 	},
+ 
++	{ XE_RTP_NAME("14023061436"),
++	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(3000, 3001),
++		       FUNC(xe_rtp_match_first_render_or_compute)),
++	  XE_RTP_ACTIONS(SET(TDL_CHICKEN, QID_WAIT_FOR_THREAD_NOT_RUN_DISABLE))
++	},
++
+ 	{}
+ };
+ 

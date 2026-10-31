@@ -1,0 +1,206 @@
+Purpose: disable semaphore DOP gating and ensure every CS IDLEDLY < MAXCNT.
+Source: Linux 7c53ff050ba88bb37eed3e17f2bb8ec592d83302
+  "drm/xe: Apply Wa_16023105232".
+Adaptation for 6.14: reuse existing RC_SEMA_IDLE_MSG_DISABLE bit 12 and RTP
+  range/ENGINE_BASE helpers; retain upstream graphics/media ranges and VF
+  skip. Initialize timestamp_base from RPM_CONFIG0 even in 6.14's divide-
+  logic CTC branch, without changing reference-clock selection.
+  Use 64-bit picoseconds and floor((MAXCNT_ps - 1) / IDLEDLY_unit_ps): the
+  supplied upstream u32 multiplication can overflow and its corrective
+  conversion mixes ns/ps. Clamp to the field, preserve reserved bits, clear
+  INHIBIT_SWITCH_UNTIL_PREEMPTED. Warn/skip on zero MAXCNT or unknown clock
+  rather than divide by zero or underflow. Register defaults normally comply.
+
+--- a/regs/xe_engine_regs.h
++++ b/regs/xe_engine_regs.h
+@@ -130,6 +130,10 @@
+ #define RING_EXECLIST_STATUS_LO(base)		XE_REG((base) + 0x234)
+ #define RING_EXECLIST_STATUS_HI(base)		XE_REG((base) + 0x234 + 4)
+ 
++#define RING_IDLEDLY(base)			XE_REG((base) + 0x23c)
++#define   INHIBIT_SWITCH_UNTIL_PREEMPTED	REG_BIT(31)
++#define   IDLE_DELAY				REG_GENMASK(20, 0)
++
+ #define RING_CONTEXT_CONTROL(base)		XE_REG((base) + 0x244, XE_REG_OPTION_MASKED)
+ #define	  CTX_CTRL_OAC_CONTEXT_ENABLE		REG_BIT(8)
+ #define	  CTX_CTRL_RUN_ALONE			REG_BIT(7)
+--- a/xe_gt_clock.c
++++ b/xe_gt_clock.c
+@@ -12,6 +12,7 @@
+ #include "xe_assert.h"
+ #include "xe_device.h"
+ #include "xe_gt.h"
++#include "xe_gt_printk.h"
+ #include "xe_macros.h"
+ #include "xe_mmio.h"
+ 
+@@ -31,45 +32,52 @@
+ 	return base_freq + frac_freq;
+ }
+ 
+-static u32 get_crystal_clock_freq(u32 rpm_config_reg)
++static void read_crystal_clock(struct xe_gt *gt, u32 rpm_config_reg, u32 *freq,
++			       u32 *timestamp_base)
+ {
+-	const u32 f19_2_mhz = 19200000;
+-	const u32 f24_mhz = 24000000;
+-	const u32 f25_mhz = 25000000;
+-	const u32 f38_4_mhz = 38400000;
+ 	u32 crystal_clock = REG_FIELD_GET(RPM_CONFIG0_CRYSTAL_CLOCK_FREQ_MASK,
+ 					  rpm_config_reg);
+ 
+ 	switch (crystal_clock) {
+ 	case RPM_CONFIG0_CRYSTAL_CLOCK_FREQ_24_MHZ:
+-		return f24_mhz;
++		*freq = 24000000;
++		*timestamp_base = 83333;
++		return;
+ 	case RPM_CONFIG0_CRYSTAL_CLOCK_FREQ_19_2_MHZ:
+-		return f19_2_mhz;
++		*freq = 19200000;
++		*timestamp_base = 52083;
++		return;
+ 	case RPM_CONFIG0_CRYSTAL_CLOCK_FREQ_38_4_MHZ:
+-		return f38_4_mhz;
++		*freq = 38400000;
++		*timestamp_base = 52083;
++		return;
+ 	case RPM_CONFIG0_CRYSTAL_CLOCK_FREQ_25_MHZ:
+-		return f25_mhz;
++		*freq = 25000000;
++		*timestamp_base = 80000;
++		return;
+ 	default:
+-		XE_WARN_ON("NOT_POSSIBLE");
+-		return 0;
++		xe_gt_warn(gt, "Invalid crystal clock frequency: %u\n", crystal_clock);
++		*freq = 0;
++		*timestamp_base = 0;
++		return;
+ 	}
+ }
+ 
+ int xe_gt_clock_init(struct xe_gt *gt)
+ {
+ 	u32 ctc_reg = xe_mmio_read32(&gt->mmio, CTC_MODE);
++	u32 c0 = xe_mmio_read32(&gt->mmio, RPM_CONFIG0);
+ 	u32 freq = 0;
+ 
+ 	/* Assuming gen11+ so assert this assumption is correct */
+ 	xe_gt_assert(gt, GRAPHICS_VER(gt_to_xe(gt)) >= 11);
+ 
++	/* IDLEDLY needs the crystal timestamp base in either CTC mode. */
++	read_crystal_clock(gt, c0, &freq, &gt->info.timestamp_base);
++
+ 	if (ctc_reg & CTC_SOURCE_DIVIDE_LOGIC) {
+ 		freq = read_reference_ts_freq(gt);
+ 	} else {
+-		u32 c0 = xe_mmio_read32(&gt->mmio, RPM_CONFIG0);
+-
+-		freq = get_crystal_clock_freq(c0);
+-
+ 		/*
+ 		 * Now figure out how the command stream's timestamp
+ 		 * register increments from this frequency (it might
+--- a/xe_gt_types.h
++++ b/xe_gt_types.h
+@@ -121,6 +121,8 @@
+ 		enum xe_gt_type type;
+ 		/** @info.reference_clock: clock frequency */
+ 		u32 reference_clock;
++		/** @info.timestamp_base: command streamer timestamp base in ps */
++		u32 timestamp_base;
+ 		/**
+ 		 * @info.engine_mask: mask of engines present on GT. Some of
+ 		 * them may be reserved in runtime and not available for user.
+--- a/xe_hw_engine.c
++++ b/xe_hw_engine.c
+@@ -5,10 +5,12 @@
+ 
+ #include "xe_hw_engine.h"
+ 
++#include <linux/math64.h>
+ #include <linux/nospec.h>
+ 
+ #include <drm/drm_managed.h>
+ #include <uapi/drm/xe_drm.h>
++#include <generated/xe_wa_oob.h>
+ 
+ #include "regs/xe_engine_regs.h"
+ #include "regs/xe_gt_regs.h"
+@@ -566,6 +568,39 @@
+ 	xe_reg_whitelist_process_engine(hwe);
+ }
+ 
++static void adjust_idledly(struct xe_hw_engine *hwe)
++{
++	struct xe_gt *gt = hwe->gt;
++	u32 idledly, maxcnt, delay, idledly_units_ps;
++	u64 maxcnt_ps;
++
++	if (IS_SRIOV_VF(gt_to_xe(gt)) || !XE_WA(gt, 16023105232))
++		return;
++
++	idledly_units_ps = 8 * gt->info.timestamp_base;
++	if (xe_gt_WARN_ON(gt, !idledly_units_ps))
++		return;
++
++	idledly = xe_mmio_read32(&gt->mmio, RING_IDLEDLY(hwe->mmio_base));
++	maxcnt = xe_mmio_read32(&gt->mmio, RING_PWRCTX_MAXCNT(hwe->mmio_base));
++	maxcnt = REG_FIELD_GET(IDLE_WAIT_TIME, maxcnt);
++	/* No nonnegative IDLEDLY can be strictly lower than a zero MAXCNT. */
++	if (xe_gt_WARN_ON(gt, !maxcnt))
++		return;
++
++	maxcnt_ps = (u64)maxcnt * 640000;
++	delay = REG_FIELD_GET(IDLE_DELAY, idledly);
++	if (xe_gt_WARN_ON(gt, (u64)delay * idledly_units_ps >= maxcnt_ps ||
++			  (idledly & INHIBIT_SWITCH_UNTIL_PREEMPTED))) {
++		/* Keep units in ps and round down to enforce the strict inequality. */
++		delay = min_t(u64, div_u64(maxcnt_ps - 1, idledly_units_ps),
++			      REG_FIELD_GET(IDLE_DELAY, IDLE_DELAY));
++		xe_mmio_rmw32(&gt->mmio, RING_IDLEDLY(hwe->mmio_base),
++			      IDLE_DELAY | INHIBIT_SWITCH_UNTIL_PREEMPTED,
++			      REG_FIELD_PREP(IDLE_DELAY, delay));
++	}
++}
++
+ static int hw_engine_init(struct xe_gt *gt, struct xe_hw_engine *hwe,
+ 			  enum xe_hw_engine_id id)
+ {
+@@ -605,6 +640,9 @@
+ 	/* We reserve the highest BCS instance for USM */
+ 	if (xe->info.has_usm && hwe->class == XE_ENGINE_CLASS_COPY)
+ 		gt->usm.reserved_bcs_instance = hwe->instance;
++
++	/* Wa_16023105232: every CS must idle before its power-context timeout. */
++	adjust_idledly(hwe);
+ 
+ 	return devm_add_action_or_reset(xe->drm.dev, hw_engine_fini, hwe);
+ 
+--- a/xe_wa.c
++++ b/xe_wa.c
+@@ -614,6 +614,13 @@
+ 				   SMP_FORCE_128B_OVERFETCH))
+ 	},
+ 
++	{ XE_RTP_NAME("16023105232"),
++	  XE_RTP_RULES(MEDIA_VERSION_RANGE(1301, 3000), OR,
++		       GRAPHICS_VERSION_RANGE(2001, 3001)),
++	  XE_RTP_ACTIONS(SET(RING_PSMI_CTL(0), RC_SEMA_IDLE_MSG_DISABLE,
++			     XE_RTP_ACTION_FLAG(ENGINE_BASE)))
++	},
++
+ 	{}
+ };
+ 
+--- a/xe_wa_oob.rules
++++ b/xe_wa_oob.rules
+@@ -40,5 +40,7 @@
+ 14019789679	GRAPHICS_VERSION(1255)
+ 		GRAPHICS_VERSION_RANGE(1270, 2004)
+ no_media_l3	MEDIA_VERSION(3000)
++16023105232	GRAPHICS_VERSION_RANGE(2001, 3001)
++		MEDIA_VERSION_RANGE(1301, 3000)
+ 14022866841	GRAPHICS_VERSION(3000), GRAPHICS_STEP(A0, B0)
+ 		MEDIA_VERSION(3000), MEDIA_STEP(A0, B0)

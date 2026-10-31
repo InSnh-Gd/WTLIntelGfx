@@ -1,0 +1,73 @@
+Purpose: ask GuC to restore unsaved Xe3 media control registers (KLV 0x900c).
+Source: Linux d72779c29d82c6e371cea8b427550bd6923c2577
+  "drm/xe/ptl: Apply Wa_16026007364".
+Adaptation for 6.14: add ABI key and a two-word helper alongside the existing
+  simple/one-word helpers; use the existing simple helper's checked buffer
+  accounting style. Preserve payload {0, 0xf}, GuC >= 70.47.0 guard, and
+  MEDIA_VERSION(3000) rule. The existing 4 KiB ADS WA buffer is sufficient;
+  do not import unrelated VF KLV 0x900b.
+
+--- a/abi/guc_klvs_abi.h
++++ b/abi/guc_klvs_abi.h
+@@ -367,6 +367,7 @@
+ 	GUC_WA_KLV_NP_RD_WRITE_TO_CLEAR_RCSM_AT_CGP_LATE_RESTORE			= 0x9008,
+ 	GUC_WORKAROUND_KLV_ID_BACK_TO_BACK_RCS_ENGINE_RESET				= 0x9009,
+ 	GUC_WA_KLV_WAKE_POWER_DOMAINS_FOR_OUTBOUND_MMIO					= 0x900a,
++	GUC_WA_KLV_RESTORE_UNSAVED_MEDIA_CONTROL_REG					= 0x900c,
+ };
+ 
+ #endif
+--- a/xe_guc_ads.c
++++ b/xe_guc_ads.c
+@@ -283,6 +283,28 @@
+ 	return total_size;
+ }
+ 
++static void guc_waklv_enable_two_word(struct xe_guc_ads *ads,
++				    enum xe_guc_klv_ids klv_id,
++				    u32 value1, u32 value2,
++				    u32 *offset, u32 *remain)
++{
++	u32 klv_entry[] = {
++		FIELD_PREP(GUC_KLV_0_KEY, klv_id) | FIELD_PREP(GUC_KLV_0_LEN, 2),
++		value1,
++		value2,
++	};
++	u32 size = sizeof(klv_entry);
++
++	if (xe_gt_WARN(ads_to_gt(ads), *remain < size,
++		       "w/a klv buffer too small to add klv id %d\n", klv_id))
++		return;
++
++	xe_map_memcpy_to(ads_to_xe(ads), ads_to_map(ads), *offset,
++			 klv_entry, size);
++	*offset += size;
++	*remain -= size;
++}
++
+ static void guc_waklv_enable_one_word(struct xe_guc_ads *ads,
+ 				      enum xe_guc_klv_ids klv_id,
+ 				      u32 value,
+@@ -375,6 +397,12 @@
+ 		guc_waklv_enable_simple(ads,
+ 					GUC_WORKAROUND_KLV_ID_BACK_TO_BACK_RCS_ENGINE_RESET,
+ 					&offset, &remain);
++
++	if (GUC_FIRMWARE_VER(&gt->uc.guc) >= MAKE_GUC_VER(70, 47, 0) &&
++	    XE_WA(gt, 16026007364))
++		guc_waklv_enable_two_word(ads,
++					 GUC_WA_KLV_RESTORE_UNSAVED_MEDIA_CONTROL_REG,
++					 0x0, 0xf, &offset, &remain);
+ 
+ 	size = guc_ads_waklv_size(ads) - remain;
+ 	if (!size)
+--- a/xe_wa_oob.rules
++++ b/xe_wa_oob.rules
+@@ -42,6 +42,7 @@
+ 14019789679	GRAPHICS_VERSION(1255)
+ 		GRAPHICS_VERSION_RANGE(1270, 2004)
+ no_media_l3	MEDIA_VERSION(3000)
++16026007364	MEDIA_VERSION(3000)
+ 16023105232	GRAPHICS_VERSION_RANGE(2001, 3001)
+ 		MEDIA_VERSION_RANGE(1301, 3000)
+ 14022866841	GRAPHICS_VERSION(3000), GRAPHICS_STEP(A0, B0)

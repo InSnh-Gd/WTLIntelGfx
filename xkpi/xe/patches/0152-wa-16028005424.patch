@@ -1,0 +1,46 @@
+Purpose: disable GuC signaling engines on both graphics and media GTs.
+Source: Linux 9d94c1cf6ef938abd4b849b66f8eab11e3c537ef
+  "drm/xe/xe3_lpg: Apply Wa_16028005424"; Linux
+  de96c43a69b1caf3190609a6509f22433a118782
+  "drm/xe: Apply WA_16028005424 to Media".
+Adaptation for 6.14: combine identical GT actions with OR rules using the
+  existing RTP helpers. Preserve both commits' version ranges (including
+  PTL graphics/media 30.00); there is no stepping restriction. Versions not
+  in 6.14's IP maps remain dormant. This is a GT write, not an LRC write.
+
+--- a/regs/xe_guc_regs.h
++++ b/regs/xe_guc_regs.h
+@@ -90,6 +90,9 @@
+ #define GUC_SEND_INTERRUPT			XE_REG(0xc4c8)
+ #define   GUC_SEND_TRIGGER			REG_BIT(0)
+ 
++#define GUC_INTR_CHICKEN			XE_REG(0xc50c)
++#define   DISABLE_SIGNALING_ENGINES		REG_BIT(1)
++
+ #define GUC_BCS_RCS_IER				XE_REG(0xc550)
+ #define GUC_VCS2_VCS1_IER			XE_REG(0xc554)
+ #define GUC_WD_VECS_IER				XE_REG(0xc558)
+--- a/xe_wa.c
++++ b/xe_wa.c
+@@ -14,6 +14,7 @@
+ 
+ #include "regs/xe_engine_regs.h"
+ #include "regs/xe_gt_regs.h"
++#include "regs/xe_guc_regs.h"
+ #include "regs/xe_regs.h"
+ #include "xe_device_types.h"
+ #include "xe_force_wake.h"
+@@ -278,6 +279,13 @@
+ 		       ENGINE_CLASS(VIDEO_DECODE)),
+ 	  XE_RTP_ACTIONS(SET(VDBOX_CGCTL3F10(0), RAMDFTUNIT_CLKGATE_DIS)),
+ 	  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE),
++	},
++
++	{ XE_RTP_NAME("16028005424"),
++	  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(3000, 3005), OR,
++		       MEDIA_VERSION(2000), OR, MEDIA_VERSION(1301), OR,
++		       MEDIA_VERSION_RANGE(3000, 3002), OR, MEDIA_VERSION(3500)),
++	  XE_RTP_ACTIONS(SET(GUC_INTR_CHICKEN, DISABLE_SIGNALING_ENGINES))
+ 	},
+ 
+ 	{}
