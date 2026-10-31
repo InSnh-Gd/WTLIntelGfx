@@ -7,6 +7,7 @@
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/bus.h>
+#include <sys/module.h>
 #include <sys/malloc.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
@@ -3250,4 +3251,68 @@ xg_drm_attached(void)
 		    strncmp(d->driver->name, "xe", 2) == 0))
 			return (1);
 	return (0);
+}
+
+/* FreeBSD pci_has_pme: capabilities, not current PME status. */
+bool
+pci_has_pme(device_t dev, int state)
+{
+ static const uint16_t masks[PCI_POWERSTATE_COUNT] = {
+  PCIM_PCAP_D0PME, PCIM_PCAP_D1PME, PCIM_PCAP_D2PME,
+  PCIM_PCAP_D3PME_HOT, PCIM_PCAP_D3PME_COLD
+ };
+ struct pci_devinfo *di = device_get_ivars(dev);
+ return state >= 0 && state < PCI_POWERSTATE_COUNT &&
+     di->cfg.pp.pp_location && (di->cfg.pp.pp_cap & masks[state]);
+}
+
+/* Restore the header/BARs cached by pci_save_state/discovery. IOPCIFamily
+ * owns MSI routing; do not reprogram its message addresses from stale BSD
+ * snapshots. M1 supports no suspend/D3 transition (see docs/xe-build.md). */
+void
+pci_restore_state(device_t dev)
+{
+ struct pci_devinfo *di = device_get_ivars(dev);
+ pcicfgregs *c = &di->cfg;
+ struct pci_map *pm;
+ pci_set_powerstate(dev, PCI_POWERSTATE_D0);
+ STAILQ_FOREACH(pm, &c->maps, pm_link) {
+  pci_write_config(dev, pm->pm_reg, (uint32_t)pm->pm_value, 4);
+  if (PCI_BAR_MEM(pm->pm_value) &&
+      (pm->pm_value & PCIM_BAR_MEM_TYPE) == PCIM_BAR_MEM_64)
+   pci_write_config(dev, pm->pm_reg + 4, (uint32_t)(pm->pm_value >> 32), 4);
+ }
+ pci_write_config(dev, PCIR_CACHELNSZ, c->cachelnsz, 1);
+ pci_write_config(dev, PCIR_LATTIMER, c->lattimer, 1);
+ pci_write_config(dev, PCIR_INTLINE, c->intline, 1);
+ if (c->pcie.pcie_location) {
+  int loc = c->pcie.pcie_location;
+  pci_write_config(dev, loc + PCIER_DEVICE_CTL, c->pcie.pcie_device_ctl, 2);
+  pci_write_config(dev, loc + PCIER_LINK_CTL, c->pcie.pcie_link_ctl, 2);
+ }
+ pci_write_config(dev, PCIR_COMMAND, c->cmdreg, 2);
+}
+
+/* DRIVER_MODULE's real newbus event path, including chained callbacks. */
+int
+driver_module_handler(struct module *mod, int what, void *arg)
+{
+ struct driver_module_data *d = arg;
+ devclass_t bus = xg_pci_devclass(d->dmd_busname, NULL, TRUE);
+ int err;
+ switch (what) {
+ case MOD_LOAD:
+  err = d->dmd_chainevh ? d->dmd_chainevh(mod, what, d->dmd_chainarg) : 0;
+  if (err) return err;
+  return devclass_add_driver(bus, d->dmd_driver, d->dmd_pass, d->dmd_devclass);
+ case MOD_UNLOAD:
+  err = devclass_delete_driver(bus, d->dmd_driver);
+  if (err) return err;
+  return d->dmd_chainevh ? d->dmd_chainevh(mod, what, d->dmd_chainarg) : 0;
+ case MOD_QUIESCE:
+  /* No quiesce operation exists in this static, manually staged bus. */
+  return EOPNOTSUPP;
+ default:
+  return EOPNOTSUPP;
+ }
 }

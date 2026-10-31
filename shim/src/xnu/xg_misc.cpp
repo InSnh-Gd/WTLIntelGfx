@@ -81,8 +81,11 @@ xg_misc_fw_request(const char *name, void **datap, unsigned long *lenp, unsigned
 	*datap = nullptr;
 	*lenp = 0;
 	/* Match the flat Resources directory and embedded firmware table. */
-	if (const char *base = strrchr(name, '/'))
-		name = base + 1;
+	const char *base = name;
+	for (const char *p = name; *p; p++)
+		if (*p == '/')
+			base = p + 1;
+	name = base;
 	for (const xg_fw_blob *b = xg_fw_embedded; b->name != nullptr; b++) {
 		if (strcmp(b->name, name) != 0)
 			continue;

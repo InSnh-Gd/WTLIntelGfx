@@ -16,21 +16,6 @@ void xg_xe_drmm_mutex_release(struct drm_device *dev, void *lock)
 }
 
 /*
- * The fake-offset of a dumb buffer for mmap (Linux's drm_gem_ttm_dumb_map_offset, which drm-kmod does not build):
- * every GEM object has a VMA offset node, and that node's address is the mmap offset.
- */
-int drm_gem_ttm_dumb_map_offset(struct drm_file *file, struct drm_device *dev, uint32_t handle, uint64_t *offset)
-{
-	struct drm_gem_object *gem = drm_gem_object_lookup(file, handle);
-
-	if (gem == NULL)
-		return -ENOENT;
-	*offset = drm_vma_node_offset_addr(&gem->vma_node);
-	drm_gem_object_put(gem);
-	return 0;
-}
-
-/*
  * Intel's graphics _DSM: on Linux it is registered for vga_switcheroo (switchable-graphics laptops). macOS has no
  * switcheroo, and which GPU drives which output is fixed by the boot configuration, so nothing registers.
  */
@@ -55,4 +40,34 @@ unsigned long xg_xe_mm_copy_from_user(struct mm_struct *mm, void *to,
     const void *from, unsigned long n)
 {
  return n;
+}
+
+#include <linux/ioport.h>
+#include <linux/mmu_notifier.h>
+#include "xe_hmm.h"
+
+/* Initialized from the shim's stage-3 DSM discovery before PCI registration. */
+struct resource intel_graphics_stolen_res;
+
+/* No ACPI video provider on XNU; never claim one was registered. */
+void intel_acpi_video_register(struct intel_display *display) { }
+
+/* CONFIG_HMM_MIRROR is off: never publish or DMA-map userspace pages.
+ * No population can succeed, so free/unmap have no resources to release. */
+int xe_hmm_userptr_populate_range(struct xe_userptr_vma *uvma, bool locked)
+{
+ return -EOPNOTSUPP;
+}
+void xe_hmm_userptr_free_sg(struct xe_userptr_vma *uvma) { }
+void xe_hmm_userptr_unmap(struct xe_userptr_vma *uvma) { }
+
+/* Match the shim notifier model: wired mappings never invalidate. Userptr
+ * itself is rejected above; these do not enable unsupported HMM use. */
+bool mmu_interval_check_retry(struct mmu_interval_notifier *mni, unsigned long seq)
+{
+ return mmu_interval_read_retry(mni, seq);
+}
+bool mmu_notifier_range_blockable(const struct mmu_notifier_range *range)
+{
+ return true;
 }

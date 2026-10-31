@@ -1,0 +1,111 @@
+--- a/xe_ggtt_types.h
++++ b/xe_ggtt_types.h
+@@ -45,6 +45,8 @@
+ 	const struct xe_ggtt_pt_ops *pt_ops;
+ 	/** @mm: The memory manager used to manage individual GGTT allocations */
+ 	struct drm_mm mm;
++	/** @bootfb: GOP node; never clear firmware PTEs on teardown. */
++	struct drm_mm_node bootfb;
+ 	/** @access_count: counts GGTT writes */
+ 	unsigned int access_count;
+ 	/** @wq: Dedicated unordered work queue to process node removals */
+--- a/xe_ggtt.c
++++ b/xe_ggtt.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include "xe_ggtt.h"
++#include "xg_xe.h"
+ 
+ #include <linux/fault-inject.h>
+ #include <linux/io-64-nonatomic-lo-hi.h>
+@@ -166,6 +167,8 @@
+ 
+ 	destroy_workqueue(ggtt->wq);
+ 	mutex_destroy(&ggtt->lock);
++	if (drm_mm_node_allocated(&ggtt->bootfb))
++		drm_mm_remove_node(&ggtt->bootfb);
+ 	drm_mm_takedown(&ggtt->mm);
+ }
+ 
+@@ -256,6 +259,33 @@
+ 	err = drmm_add_action_or_reset(&xe->drm, ggtt_fini_early, ggtt);
+ 	if (err)
+ 		return err;
++
++	/* Before first allocation AND initial_clear. Regions outside mm are
++	 * already excluded from both. Only the root tile scans out GOP. */
++	if (ggtt->tile == xe_device_get_root_tile(xe)) {
++		unsigned long long offset, size;
++		u64 start, end;
++		int found = xg_xe_bootfb_get(&offset, &size);
++
++		if (found < 0)
++			return found;
++		if (found) {
++			if (!size || size > U64_MAX - (XE_PAGE_SIZE - 1) ||
++			    offset > U64_MAX - size - (XE_PAGE_SIZE - 1))
++				return -EINVAL;
++			start = max_t(u64, round_down(offset, XE_PAGE_SIZE), xe_wopcm_size(xe));
++			end = min_t(u64, round_up(offset + size, XE_PAGE_SIZE), ggtt->size);
++			if (end > start) {
++				ggtt->bootfb.start = start;
++				ggtt->bootfb.size = end - start;
++				err = drm_mm_reserve_node(&ggtt->mm, &ggtt->bootfb);
++				if (err)
++					return err;
++			}
++			drm_info(&xe->drm, "GOP GGTT %#llx + %#llx protected (allocator %#llx + %#llx)\n",
++				offset, size, ggtt->bootfb.start, ggtt->bootfb.size);
++		}
++	}
+ 
+ 	if (IS_SRIOV_VF(xe)) {
+ 		err = xe_gt_sriov_vf_prepare_ggtt(xe_tile_get_gt(ggtt->tile, 0));
+--- a/xe_ttm_stolen_mgr.c
++++ b/xe_ttm_stolen_mgr.c
+@@ -23,6 +23,7 @@
+ #include "xe_res_cursor.h"
+ #include "xe_sriov.h"
+ #include "xe_ttm_stolen_mgr.h"
++#include "xg_xe.h"
+ #include "xe_ttm_vram_mgr.h"
+ #include "xe_wa.h"
+ 
+@@ -228,6 +229,36 @@
+ 	else
+ 		stolen_size = detect_stolen(xe, mgr);
+ 
++	/* BAR2 is a CPU alias, not physical BDSM. Move BOTH CPU/GPU bases
++	 * past the GOP physical bounding interval; prefix exclusion handles
++	 * fragmented firmware pages conservatively without leaking buddy nodes. */
++	if (stolen_size && !IS_DGFX(xe) && !IS_SRIOV_VF(xe)) {
++		unsigned long long phys, size;
++		u64 dsm, skip;
++		u32 lo, hi;
++		int found = xg_xe_bootfb_phys_get(&phys, &size);
++
++		if (found < 0) {
++			drm_err(&xe->drm, "GOP location unknown: stolen disabled\n");
++			return;
++		}
++		if (GRAPHICS_VERx100(xe) >= 1270) {
++			pci_read_config_dword(pdev, 0xc0, &lo);
++			pci_read_config_dword(pdev, 0xc4, &hi);
++			dsm = ((u64)hi << 32 | lo) & GENMASK_ULL(63, 20);
++		} else {
++			dsm = mgr->stolen_base;
++		}
++		if (found && size && phys <= U64_MAX - size &&
++		    phys < dsm + stolen_size && phys + size > dsm) {
++			skip = min_t(u64, ALIGN(phys + size - dsm, PAGE_SIZE), stolen_size);
++			mgr->io_base += skip;
++			mgr->stolen_base += skip;
++			stolen_size -= skip;
++			drm_info(&xe->drm, "GOP DSM %#llx: exclude prefix %#llx bytes\n", dsm, skip);
++		}
++	}
++
+ 	if (!stolen_size) {
+ 		drm_dbg_kms(&xe->drm, "No stolen memory support\n");
+ 		return;

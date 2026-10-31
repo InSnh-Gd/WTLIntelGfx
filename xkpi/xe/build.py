@@ -28,6 +28,9 @@ def prepare(root, src):
         subprocess.run(['patch', '-p1', '-i', str(patch)], cwd=xe, check=True)
     gen = root / 'out/xe-gen'
     (gen / 'generated').mkdir(parents=True, exist_ok=True)
+    devres = src / 'freebsd/sys/compat/linuxkpi/common/src/linux_devres.c'
+    (gen / 'linux_devres.c').write_text(
+        devres.read_text() + (port / 'devres-release.inc').read_text())
     subprocess.run(['cc', '-O2', '-o', str(gen / 'xe_gen_wa_oob'),
                     str(xe / 'xe_gen_wa_oob.c')], check=True)
     for rules in sorted(xe.glob('*wa_oob.rules')):
@@ -82,6 +85,7 @@ def sources(root, src, kcfg):
                 p = xe / c
             out.append(str(p))
     drop = {l.split('#')[0].strip() for l in (root / 'xkpi/xe/exclude.txt').read_text().splitlines()}
+    out.append(str(src / 'drm-kmod/drivers/gpu/drm/drm_gem_ttm_helper.c'))
     return list(dict.fromkeys(p for p in out if pathlib.Path(p).name not in drop)) + [
         str(p) for p in sorted((root / 'xkpi/xe/src').glob('*.c'))]
 

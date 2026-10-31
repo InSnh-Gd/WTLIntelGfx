@@ -127,7 +127,11 @@ def sources(mod):
     if mod == "xe":
         return xe_build.sources(ROOT, SRC, {v.partition("=")[0] for v in kconfig()})
     drop = overlay_exclude()
-    return [p for p in _sources(mod) if os.path.basename(p) not in drop] + overlay_sources(mod)
+    paths = [p for p in _sources(mod) if os.path.basename(p) not in drop] + overlay_sources(mod)
+    if KMD == 'xe' and mod == 'lkpi':
+        paths = [os.path.join(ROOT, 'out/xe-gen/linux_devres.c')
+                 if os.path.basename(p) == 'linux_devres.c' else p for p in paths]
+    return paths
 
 
 def _sources(mod):

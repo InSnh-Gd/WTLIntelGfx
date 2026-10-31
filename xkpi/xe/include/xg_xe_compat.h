@@ -204,7 +204,7 @@ static inline unsigned long secs_to_jiffies(unsigned int secs) { return msecs_to
 #define drmm_kmalloc(dev, size, gfp) drmm_kzalloc((dev), (size), (gfp))
 #endif
 
-/* Not provided by this LinuxKPI yet; retained as an unresolved runtime API. */
+/* Supplied by the xe-only extension to FreeBSD linux_devres.c. */
 void lkpi_devm_release_action(struct device *dev, void (*action)(void *), void *data);
 #define devm_release_action(dev, action, data) lkpi_devm_release_action((dev), (action), (data))
 

@@ -1,7 +1,7 @@
 /*
  * XeGfx kext entry. The module loads idle on IOResources and does nothing until a stage is asked for:
  *   sysctl debug.xegfx_stage=N runs every stage up to N that has not run yet (1 shim, 2 read-only GPU probe,
- *   3 bus and DMA, 4 drm/i915 SYSINITs and a GT health check, 5 one request on every engine,
+ *   3 bus and DMA, 4 DRM/KMD SYSINITs and a GT health check, 5 one request on every engine,
  *   6 every engine writes a dword the CPU reads back, 7 set nmxgpu-claimed for the Metal accelerator). debug.xegfx_env sets tunables for the stages (overrides boot-args).
  * Nothing loads it at boot: its one personality waits for the XeGfxArm resource, which _start publishes after a
  * manual `kmutil load -b org.watchthelight.XeGfx`. There is no PCI personality: the shim finds the GPU in the registry. A stage that runs longer than
@@ -20,7 +20,11 @@
 #include <sys/errno.h>
 #include <sys/sysctl.h>
 #include <string.h>
+#ifdef XEGFX_KMD_XE
+#include "xg_xe.h"
+#else
 #include "xg_i915.h"
+#endif
 #include "xg_fd.h"
 #include "xg_vmap.h"
 
@@ -226,6 +230,117 @@ xg_find_igpu(void)
 	return gpu ? gpu : xg_find_pci(0x8086, 0x03, 0x80);
 }
 
+#ifdef XEGFX_KMD_XE
+static uint32_t gXeBootSurf;
+static int gXeBootFound = -ENXIO;
+static void *gXeBootPixels;
+static unsigned long long gXePhysStart, gXePhysSize, gXePteSum, gXePixelSum;
+static bool gXeBaseline;
+
+extern "C" int
+xg_xe_bootfb_get(unsigned long long *offset, unsigned long long *size)
+{
+ *offset = gXeBootSurf;
+ *size = xg_boot_fb_size;
+ return gXeBootFound;
+}
+
+extern "C" int
+xg_xe_bootfb_phys_get(unsigned long long *phys, unsigned long long *size)
+{
+ *phys = gXePhysStart;
+ *size = gXePhysSize;
+ return gXeBootFound;
+}
+
+static uint64_t
+xg_fnv(uint64_t hash, uint64_t value, unsigned bytes)
+{
+ for (unsigned b = 0; b < bytes; b++) {
+  hash = (hash ^ (value & 255)) * 1099511628211ull;
+  value >>= 8;
+ }
+ return hash;
+}
+
+extern "C" int
+xg_xe_bootfb_checksum(unsigned long long *ptes, unsigned long long *pixels)
+{
+ *ptes = *pixels = 0;
+ if (gXeBootFound != 1 || !gXeBootPixels)
+  return -ENXIO;
+ IOPCIDevice *gpu = xg_find_igpu();
+ IOMemoryMap *mm = gpu ? gpu->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0, kIOMapInhibitCache) : nullptr;
+ int rc = -EIO;
+ if (mm && mm->getLength() >= (16ull << 20)) {
+  volatile uint64_t *gsm = (volatile uint64_t *)(mm->getVirtualAddress() + (8ull << 20));
+  uint64_t ph = 14695981039346656037ull, ih = ph;
+  for (uint64_t i = 0; i < (xg_boot_fb_size + 4095) / 4096; i++)
+   ph = xg_fnv(ph, gsm[(gXeBootSurf >> 12) + i], 8);
+  volatile uint32_t *p = (volatile uint32_t *)gXeBootPixels;
+  for (uint64_t i = 0; i + 4 <= xg_boot_fb_size; i += 64)
+   ih = xg_fnv(ih, p[i / 4], 4);
+  ih = xg_fnv(ih, p[(xg_boot_fb_size - 4) / 4], 4);
+  *ptes = ph;
+  *pixels = ih;
+  rc = 0;
+ }
+ OSSafeReleaseNULL(mm);
+ OSSafeReleaseNULL(gpu);
+ return rc;
+}
+
+/* Stage 2 only. Never infer physical DSM from the BAR2 CPU alias. */
+static int
+xg_xe_capture_bootfb(IOPCIDevice *gpu, IOMemoryMap *mm)
+{
+ if (!gPipeLit) {
+  gXeBootFound = 0;
+  return 0;
+ }
+ gXeBootFound = -EINVAL;
+ volatile uint32_t *r = (volatile uint32_t *)mm->getVirtualAddress();
+ gXeBootSurf = r[0x7019c / 4] & ~0xfffu;
+ /* M1 only accepts linear 32-bpp firmware surfaces. Refuse unknown layouts
+  * instead of guessing a footprint and leaving part of GOP allocatable. */
+ uint32_t ctl = r[0x70180 / 4];
+ if ((ctl & ((7u << 10) | (1u << 15) | (1u << 4))) || ((ctl >> 24) & 15) != 4 ||
+     !xg_boot_fb_size || xg_boot_fb_size > (256ull << 20) ||
+     (uint64_t)gXeBootSurf + xg_boot_fb_size > (4ull << 30))
+  return gXeBootFound;
+ unsigned n = (unsigned)((xg_boot_fb_size + 4095) / 4096);
+ unsigned long long *pa = (unsigned long long *)IOMalloc(n * sizeof(unsigned long long));
+ if (!pa)
+  return gXeBootFound = -ENOMEM;
+ volatile uint64_t *gsm = (volatile uint64_t *)(mm->getVirtualAddress() + (8ull << 20));
+ uint64_t dsm = ((uint64_t)gpu->configRead32(0xc4) << 32 | gpu->configRead32(0xc0)) & ~0xfffffull;
+ uint64_t lo = ~0ull, hi = 0;
+ for (unsigned i = 0; i < n; i++) {
+  uint64_t pte = gsm[(gXeBootSurf >> 12) + i];
+  if (!(pte & 1) || ((pte & 2) && dsm < (8ull << 20))) {
+   IOFree(pa, n * sizeof(*pa));
+   return gXeBootFound;
+  }
+  pa[i] = (pte & 0x3ffffffff000ull) + ((pte & 2) ? dsm - (8ull << 20) : 0);
+  if (pa[i] < lo) lo = pa[i];
+  if (pa[i] + 4096 > hi) hi = pa[i] + 4096;
+ }
+ /* FreeBSD x86 VM_MEMATTR_WRITE_COMBINING = PAT_WRITE_COMBINING = 1. */
+ gXeBootPixels = xg_vm_vmap_pa(pa, n, 1);
+ xg_boot_fb_phys = pa[0];
+ IOFree(pa, n * sizeof(*pa));
+ gXePhysStart = lo;
+ gXePhysSize = hi - lo;
+ if (!gXeBootPixels)
+  return gXeBootFound = -ENOMEM;
+ gXeBootFound = 1;
+ gXeBaseline = xg_xe_bootfb_checksum(&gXePteSum, &gXePixelSum) == 0;
+ IOLog("XeGfx: GOP probe GGTT=%#x phys=%#llx bytes=%llu PTE=%#llx pixels=%#llx baseline=%d\n",
+     gXeBootSurf, xg_boot_fb_phys, xg_boot_fb_size, gXePteSum, gXePixelSum, gXeBaseline);
+ return gXeBaseline ? 0 : -EIO;
+}
+#endif
+
 static int
 xg_probe(void)
 {
@@ -259,7 +374,12 @@ xg_probe(void)
 		if (mm) {
 			volatile uint32_t *r = (volatile uint32_t *)mm->getVirtualAddress();
 			static const struct { const char *k; uint32_t off; } regs[] = {
-				{ "gmd-id-graphics", 0xd8c }, { "gmd-id-display", 0x510a0 },
+#ifdef XEGFX_KMD_XE
+				{ "gmd-id-graphics", 0x132000 }, { "gmd-id-media", 0x380000 },
+#else
+				{ "gmd-id-graphics", 0xd8c },
+#endif
+				{ "gmd-id-display", 0x510a0 },
 				{ "dsm-base-lo", 0x1080c0 }, { "dsm-base-hi", 0x1080c4 },
 				{ "pcode-stolen-access", 0x138914 },
 				{ "transconf-a", 0x70008 }, { "pipe-frmcount-a", 0x70040 },
@@ -283,6 +403,10 @@ xg_probe(void)
 					xg_put(d, "boot-fb-size", xg_boot_fb_size, 64);
 				}
 			}
+#ifdef XEGFX_KMD_XE
+			int fb = mm->getLength() >= (16ull << 20) ? xg_xe_capture_bootfb(gpu, mm) : -EIO;
+			if (fb < 0) rc = fb;
+#endif
 			mm->release();
 		} else {
 			rc = -5;
@@ -344,6 +468,19 @@ xg_display_check(void)
 		xg_put(d, "ggtt-pte-surf", pte, 64);
 		xg_put(d, "frmcount-delta", f1 - f0);
 		rc = (gSurfPte && pte != gSurfPte) ? -71 : (f1 == f0 ? -70 : 1);
+#ifdef XEGFX_KMD_XE
+  unsigned long long ph, ih;
+  int check = xg_xe_bootfb_checksum(&ph, &ih);
+  bool pte_ok = gXeBaseline && !check && ph == gXePteSum;
+  bool pixel_ok = gXeBaseline && !check && ih == gXePixelSum;
+  IOLog("XeGfx: GOP stage %d PTE before=%#llx after=%#llx %s; pixels before=%#llx after=%#llx %s (sample 4/64 bytes)\n",
+      gRunning, gXePteSum, ph, pte_ok ? "unchanged" : "CHANGED/unavailable",
+      gXePixelSum, ih, pixel_ok ? "unchanged" : "CHANGED/unavailable");
+  xg_put(d, "pte-checksum", ph, 64);
+  xg_put(d, "pixel-checksum", ih, 64);
+  xg_put(d, "checksums-unchanged", pte_ok && pixel_ok);
+  if (!pte_ok || !pixel_ok || surf != gXeBootSurf) rc = -EPROTO;
+#endif
 		xg_put(d, "result", (uint32_t)rc);
 		if (gResident)
 			gResident->setProperty("XeGfxPost", d);
@@ -358,6 +495,26 @@ xg_display_check(void)
 static int
 xg_gt_check(void)
 {
+#ifdef XEGFX_KMD_XE
+ struct xg_xe_state st;
+ int err = xg_xe_state(&st);
+ int rc = err ? err : (st.healthy ? 1 : -EIO);
+ OSDictionary *d = OSDictionary::withCapacity(12);
+ if (d) {
+  xg_put(d, "gts", st.gts);
+  xg_put(d, "engines", st.engines);
+  xg_put(d, "graphics-verx100", st.graphics_verx100);
+  xg_put(d, "media-verx100", st.media_verx100);
+  xg_put(d, "graphics-gmd", st.graphics_gmd);
+  xg_put(d, "media-gmd", st.media_gmd);
+  xg_put(d, "msi-vectors", st.vectors);
+  xg_put(d, "irq-enabled", st.irq_enabled);
+  xg_put(d, "result", (uint32_t)rc);
+  if (gResident) gResident->setProperty("XeGfxGt", d);
+  d->release();
+ }
+ return rc;
+#else
 	struct xg_i915_state st;
 	OSDictionary *d = OSDictionary::withCapacity(10);
 	int rc = xg_i915_state(&st) == 0 ? 1 : -19;
@@ -385,6 +542,7 @@ xg_gt_check(void)
 		d->release();
 	}
 	return rc;
+#endif
 }
 
 /*
@@ -395,6 +553,10 @@ xg_gt_check(void)
 static int
 xg_accel_claim(void)
 {
+#ifdef XEGFX_KMD_XE
+ IOLog("XeGfx: stage 7 accelerator claim not implemented for xe (M1)\n");
+ return -ENOTSUP;
+#else
 	IOPCIDevice *gpu = xg_find_igpu();
 
 	if (gpu == nullptr)
@@ -403,12 +565,28 @@ xg_accel_claim(void)
 	gpu->registerService();
 	gpu->release();
 	return 1;
+#endif
 }
 
 /* stage 5: a kernel request per engine proves GuC submission, the MSI path and the breadcrumb wake together */
 static int
 xg_exec_check(void)
 {
+#ifdef XEGFX_KMD_XE
+ static struct xg_xe_exec ex;
+ int err = xg_xe_exec(&ex, 2000);
+ int rc = err ? err : (!ex.engines || ex.truncated || ex.done != ex.engines || !ex.irq_delta ? -ETIMEDOUT : 1);
+ OSDictionary *d = OSDictionary::withCapacity(4);
+ if (d) {
+  xg_put(d, "engines", ex.engines);
+  xg_put(d, "done", ex.done);
+  xg_put(d, "irqs", ex.irq_delta);
+  xg_put(d, "result", (uint32_t)rc);
+  if (gResident) gResident->setProperty("XeGfxExec", d);
+  d->release();
+ }
+ return rc;
+#else
 	static struct xg_i915_exec ex;
 	unsigned int irq0 = xg_pci_irqs;
 	OSDictionary *d = OSDictionary::withCapacity(XG_I915_MAX_ENGINES + 4);
@@ -433,12 +611,17 @@ xg_exec_check(void)
 		d->release();
 	}
 	return rc;
+#endif
 }
 
 /* stage 6: the GPU writes memory the CPU then reads, through the GGTT, on every engine that can */
 static int
 xg_store_check(void)
 {
+#ifdef XEGFX_KMD_XE
+ IOLog("XeGfx: stage 6 store not implemented for xe (M1)\n");
+ return -ENOTSUP;
+#else
 	static struct xg_i915_store sd;
 	OSDictionary *d = OSDictionary::withCapacity(2 * XG_I915_MAX_ENGINES + 3);
 	int rc = xg_i915_store(&sd, 2000) == 0 ? 1 : -19;
@@ -461,6 +644,7 @@ xg_store_check(void)
 		d->release();
 	}
 	return rc;
+#endif
 }
 
 static int
@@ -504,9 +688,12 @@ xg_run_stage(int s)
 			if (rc == 1 && !xg_drm_attached())
 				rc = -19;	/* the init routines ran but no drm driver bound the GPU */
 			if (rc == 1) {
+#ifndef XEGFX_KMD_XE
 				xg_i915_map_init();
+#endif
 				rc = xg_gt_check();
 			}
+#ifndef XEGFX_KMD_XE
 			if (rc == 1 && gPipeLit && gBootSurf && xg_boot_fb_size) {
 				int err = xg_i915_reserve_bootfb(gBootSurf, xg_boot_fb_size);
 
@@ -515,6 +702,7 @@ xg_run_stage(int s)
 				if (err == -28 && gBootSurf < 0xfee00000u)
 					rc = -28;	/* something else sits there: compositing into it would overwrite it */
 			}
+#endif
 		}
 	}
 	if (s == 5)
@@ -523,6 +711,12 @@ xg_run_stage(int s)
 		rc = xg_store_check();
 	if (s == 7)
 		rc = xg_accel_claim();
+#ifdef XEGFX_KMD_XE
+	if (s >= 5) {
+		int display_rc = xg_display_check();
+		if (display_rc != 1) rc = display_rc;
+	}
+#endif
 	if (gWdogCall)
 		thread_call_cancel(gWdogCall);
 	if (gTraceOn) {
@@ -681,7 +875,7 @@ SYSCTL_PROC(_debug, OID_AUTO, xegfx_spin, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_
 SYSCTL_PROC(_debug, OID_AUTO, xegfx_trace, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0, xegfx_trace_sysctl,
     "I", "1 = write the newest console line to NVRAM xegfx-step whenever it changes, outside the stages too");
 SYSCTL_PROC(_debug, OID_AUTO, xegfx_stage, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0, xegfx_stage_sysctl,
-    "I", "highest XeGfx stage done; write N to run stages up to N (1 shim, 2 probe, 3 bus, 4 drm/i915, 5 exec, 6 store, 7 Metal accelerator)");
+    "I", "highest XeGfx stage done; write N to run stages up to N (1 shim, 2 probe, 3 bus, 4 DRM/KMD, 5 exec, 6 store, 7 Metal accelerator)");
 SYSCTL_PROC(_debug, OID_AUTO, xegfx_results, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, nullptr, 0,
     xegfx_results_sysctl, "S", "per-stage result: 0 not run, 1 pass, negative failure");
 static int
@@ -939,7 +1133,9 @@ _start(kmod_info_t *ki, void *)
 	 * FreeBSD ("GuC is known to be broken"), which on Meteor/Arrow Lake means no submission at all and a wedged GT
 	 * (Legion N-225 to N-227). The guard can override both per experiment.
 	 */
+#ifndef XEGFX_KMD_XE
 	strlcpy(xg_env, "compat.linuxkpi.i915_disable_display=1 compat.linuxkpi.i915_enable_guc=3", sizeof(xg_env));
+#endif
 	for (auto *o : gOids)
 		sysctl_register_oid(o);
 	IOService::publishResource("XeGfxArm");

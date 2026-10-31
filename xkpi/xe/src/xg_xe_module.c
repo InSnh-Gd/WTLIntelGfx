@@ -4,6 +4,9 @@
 #include <linux/moduleparam.h>
 
 #include <drm/drm_drv.h>
+#include <linux/ioport.h>
+extern struct resource intel_graphics_stolen_res;
+extern vm_paddr_t intel_graphics_stolen_base, intel_graphics_stolen_size;
 
 #include "xe_hw_fence.h"
 #include "xe_module.h"
@@ -16,7 +19,7 @@ SYSCTL_NODE(_hw, OID_AUTO, xe, CTLFLAG_RW | CTLFLAG_MPSAFE, 0, "xe driver parame
 
 struct xe_modparam xe_modparam = {
 	.force_execlist = false,
-	.probe_display = true,		/* upstream default; runtime display switch comes later */
+	.probe_display = false,		/* M1: preserve firmware GOP scanout */
 	.force_vram_bar_size = 0,	/* the BAR as the firmware sized it */
 	.guc_log_level = 3,		/* upstream default */
 	.guc_firmware_path = NULL,
@@ -29,7 +32,7 @@ struct xe_modparam xe_modparam = {
 module_param_named(force_execlist, xe_modparam.force_execlist, bool, 0444);
 MODULE_PARM_DESC(force_execlist, "Force Execlist submission");
 module_param_named(probe_display, xe_modparam.probe_display, bool, 0444);
-MODULE_PARM_DESC(probe_display, "Probe display hardware (default: true)");
+MODULE_PARM_DESC(probe_display, "Probe display hardware (default: false; M1 preserves GOP)");
 module_param_named(vram_bar_size, xe_modparam.force_vram_bar_size, uint, 0600);
 MODULE_PARM_DESC(vram_bar_size, "VRAM BAR size in MiB (firmware size retained)");
 module_param_named(guc_log_level, xe_modparam.guc_log_level, int, 0600);
@@ -71,6 +74,8 @@ static void xg_xe_exit(void)
 
 static int xg_xe_init(void)
 {
+ intel_graphics_stolen_res = (struct resource)
+     DEFINE_RES_MEM(intel_graphics_stolen_base, intel_graphics_stolen_size);
 	for (xg_xe_done = 0; xg_xe_done < (int)ARRAY_SIZE(xg_xe_steps); xg_xe_done++) {
 		int err = xg_xe_steps[xg_xe_done].init();
 		if (err) {

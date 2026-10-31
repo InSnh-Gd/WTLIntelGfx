@@ -13,3 +13,4 @@ drivers/gpu/drm/xe/xe_trace_lrc.h
 drivers/gpu/drm/xe/xe_vsec.c
 drivers/gpu/drm/xe/xe_vsec.h
 include/drm/drm_gem_ttm_helper.h
+drivers/gpu/drm/drm_gem_ttm_helper.c

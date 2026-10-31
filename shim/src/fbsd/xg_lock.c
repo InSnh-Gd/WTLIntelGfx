@@ -865,3 +865,18 @@ wakeup_one(const void *chan)
 	thread_wakeup_prim((void *)(uintptr_t)chan, 1, XG_THREAD_AWAKENED);
 	xg_sq_unlock(chan);
 }
+
+/* Atomic writer-to-reader transition: never unlock between the two modes. */
+void
+sx_downgrade_(struct sx *sx, const char *file, int line)
+{
+ volatile uintptr_t *c = &sx->sx_lock;
+ uintptr_t v;
+ xg_sq_lock(c);
+ v = *c;
+ if ((v & SX_LOCK_SHARED) || SX_OWNER(v) != (uintptr_t)curthread || sx->sx_recurse)
+  panic("xegfx: invalid sx downgrade at %s:%d", file, line);
+ atomic_store_rel_ptr(c, SX_SHARERS_LOCK(1) | (v & SX_LOCK_EXCLUSIVE_WAITERS));
+ xg_wake_all(c);
+ xg_sq_unlock(c);
+}
