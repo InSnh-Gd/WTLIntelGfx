@@ -29,7 +29,7 @@
 			<key>IONameMatch</key>
 			<string>display</string>
 			<key>IOPCIMatch</key>
-			<string>0x7d678086</string>
+			<string>0x7d678086 0xb0808086 0xb0818086 0xb0828086 0xb0838086 0xb0848086 0xb0858086 0xb0868086 0xb0878086 0xb08f8086 0xb0908086 0xb0a08086 0xb0a18086 0xb0b08086</string>
 			<key>IOProbeScore</key>
 			<integer>20001</integer>
 			<key>IOProviderClass</key>

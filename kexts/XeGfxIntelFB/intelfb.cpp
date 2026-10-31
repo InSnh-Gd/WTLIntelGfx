@@ -27,6 +27,10 @@ static const char *xifbModelName(uint16_t dev)
     case 0x7d67: case 0x7d41: return "Intel Arrow Lake Xe-LPG";
     case 0x7d51: case 0x7dd1: return "Intel Arrow Lake Xe-LPG+";
     case 0x7d40: case 0x7d45: case 0x7d55: case 0x7dd5: return "Intel Meteor Lake Xe-LPG";
+    // Panther Lake: mainline Linux include/drm/intel/pciids.h INTEL_PTL_IDS (13 IDs, 36aad21); B091/B092/B0A2 were pre-production and are dropped
+    case 0xb080: case 0xb082: case 0xb084: case 0xb086: return "Intel Arc B390 (Panther Lake Xe3)";
+    case 0xb081: case 0xb083: case 0xb085: case 0xb087: return "Intel Arc B370 (Panther Lake Xe3)";
+    case 0xb08f: case 0xb090: case 0xb0a0: case 0xb0a1: case 0xb0b0: return "Intel Graphics (Panther Lake Xe3)";
     default: return "Intel Xe Graphics";
     }
 }
