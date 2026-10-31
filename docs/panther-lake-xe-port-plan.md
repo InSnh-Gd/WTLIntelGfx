@@ -89,7 +89,7 @@ NullMoth 的层和本仓库不是同一棵树。`d96eaca` 的 `gpu-port/xkpi/bsd
 `fork_xe.py`（`d96eaca`）里点亮要用的编辑：
 
 - `xe_pci.c` 去掉 `.sriov_configure`（LinuxKPI 的 `pci_driver` 没有这个回调）。这和 vibe `0001` 不是一回事。`0001` 把 `has_sriov` 设为真，VF 才会走 VF 探针。裸机 PF 保持 6.14 的默认，`has_sriov` 关闭，本地加载 GuC。
-- `xe_uc_fw.c` 给 `PANTHERLAKE` 加上 GuC / HuC。原补丁把 GuC 下限写成和 LNL/BMG 一样的 70.29.2，并且明确不加入 GSC。点亮时下限改成主线现在的 70.54.0，链进去的文件用 linux-firmware 里的 70.72.1。
+- `xe_uc_fw.c` 给 `PANTHERLAKE` 只加上 GuC，不定义 HuC 的 fw_def，并且明确不加入 GSC。原补丁把 GuC 下限写成和 LNL/BMG 一样的 70.29.2。点亮时下限改成主线现在的 70.54.0，链进去的文件用 linux-firmware 里的 70.72.1。M1 定义了 HuC 路径但文件缺失会让 probe 失败，认证失败会走到 `xe_gt_assert`，所以 HuC/GSC 认证留到后期。
 - BAR 不在驱动里 resize，沿用固件 / OpenCore 已经设好的窗口。
 - runtime PM 那几处是“macOS 上没有 per-device RPM 状态”。和 vibe `0011` 一起看：若 `pm_runtime_get_if_active` 仍是失败桩，G2H 会被丢掉，先修这个。
 
@@ -99,11 +99,11 @@ NullMoth 的层和本仓库不是同一棵树。`d96eaca` 的 `gpu-port/xkpi/bsd
 
 6.14 `include/drm/intel/pciids.h` 的 `INTEL_PTL_IDS`（10 个）：`B080 B081 B082 B090 B091 B092 B0A0 B0A1 B0A2 B0B0`。
 
-主线 `36aad21` 的 `INTEL_PTL_IDS`（13 个，调研笔记对到 pciids.h 870–885 行）：`B080 B081 B082 B083 B084 B085 B086 B087 B08F B090 B0A0 B0A1 B0B0`。`B091`、`B092`、`B0A2` 已经从主线表里删除。Wildcat Lake `FD80` / `FD81` 在主线 `xe_pci.c` 里也指向 `ptl_desc`，不在这次点亮范围里。
+主线 `36aad21` 的 `INTEL_PTL_IDS`（13 个，调研笔记对到 pciids.h 870–885 行）：`B080 B081 B082 B083 B084 B085 B086 B087 B08F B090 B0A0 B0A1 B0B0`。`B091`、`B092`、`B0A2` 已经从主线表里删除（`16016ade13f6` 在 v6.15 删掉这批预生产 ID）。`B0A1` 是 `aee2d33da882` 在 2026-09 重新加回的，v7.2 里还没有。Wildcat Lake `FD80` / `FD81` 在主线 `xe_pci.c` 里也指向 `ptl_desc`，不在这次点亮范围里。
 
 Mesa `bffd919` 的 `include/pci_ids/iris_pci_ids.h` 有 `B080`–`B087`、`B08F`、`B090`、`B0A0`、`B0B0`，没有 `B0A1`。`0xb080` 的名字是 `Intel(R) Arc(tm) B390`。
 
-点亮先覆盖 `B080` 和实机 `B082`。其余 ID 跟着选定的那份 `pciids.h` 走，不手写第三张表。
+点亮先覆盖 `B080` 和实机 `B082`，这两个 ID 在 6.14 和主线里都有，不受影响。6.14 缺 `B083`–`B087` 和 `B08F`，等于少了一半 B390/B370 零售 SKU，还带着已删除的 `B091`/`B092`/`B0A2`。M1 把 `ptl_ids` 和 Info.plist 匹配表按主线的 13 个 ID 补齐，删掉 `B091`、`B092`、`B0A2`，不手写第三张表。
 
 Framework 13 的实机（[issue #11](https://github.com/watchthelight-labs/WTLIntelGfx/issues/11)）是 `8086:b082` rev 04，Linux xe 报：
 
@@ -132,7 +132,7 @@ static const struct xe_device_desc ptl_desc = {
 
 GMD_ID `3000` 和 `3001` 映射到 `graphics_xe2`，名字字符串是 `"Xe2_LPG / Xe2_HPG / Xe3_LPG"`。`XE2_GFX_FEATURES` 里已经有 `has_flat_ccs = 1`、`dma_mask_size = 46`、`va_bits = 48`、`vm_max_level = 4`。媒体 GMD_ID `3000` 映射到 `media_xe2`，引擎掩码含 `GSCCS0`。
 
-所以在 6.14 上，B082 这种 30.00 的核显会从图形 IP 描述拿到 flat CCS，不是从 `ptl_desc`。主线 7.3 把 `has_flat_ccs`、`has_sriov` 写在 `ptl_desc` 上，图形 IP 还多了 30.03 / 30.04 / 30.05。6.14 的表没有这几档。probe 时如果 GMD_ID 对不上，`handle_gmdid` 失败，这是留下 6.14 的主要风险。
+所以在 6.14 上，B082 这种 30.00 的核显会从图形 IP 描述拿到 flat CCS，不是从 `ptl_desc`。主线 7.3 把 `has_flat_ccs`、`has_sriov` 写在 `ptl_desc` 上，图形 IP 还多了 30.03 / 30.04 / 30.05，其中 30.03 是 WCL，30.04/30.05 是 xe3p 系列，都不是 PTL，和 PTL 点亮无关。B082 实测 graphics/media 都是 30.00，正好落在 6.14 的 3000/3001 表里。B080 按 SKU 推断也是 30.00，等实机读 GMD_ID 确认。基线是否上调看的是 WA 缺失和固件处理（M1 的回移清单），不是这张 IP 表；中期目标把 xe 对齐到 v7.2。
 
 `require_force_probe` 在 6.14 上还在。不关的话，驱动认到 ID 也会拒绝 probe。主线从 6.17 起拿掉了这个标志（`94de1dfd4729`）。我们编 6.14，就在 `ptl_desc` 里关掉，或给一个 `xe.force_probe` tunable，默认放行 PTL。
 
@@ -143,7 +143,7 @@ GMD_ID `3000` 和 `3001` 映射到 `graphics_xe2`，名字字符串是 `"Xe2_LPG
 | 用途 | 驱动里的路径 | 版本 | 点亮 |
 |---|---|---|---|
 | GuC | `xe/ptl_guc_70.bin` | 下限 70.54.0；linux-firmware 与实机都是 70.72.1 | 要。GT0、GT1 各加载一份 |
-| HuC | `xe/ptl_huc.bin` | 实机 10.3.3 | 文件一起链进去。6.14 没有 GSC 105 时认证会停在未认证，渲染不靠它 |
+| HuC | `xe/ptl_huc.bin` | 实机 10.3.3 | M1 不定义 fw_def，状态保持 `NOT_SUPPORTED`，渲染不靠它。认证和 GSC 留到后期 |
 | GSC | `xe/ptl_gsc_1.bin` | 下限 major 105；实机 105.0.2.1397，运行 `cv105.1.0` | 第一帧不要。HuC 认证和 PXP 需要，还要 MEI GSC proxy |
 | DMC（display 30.00） | `i915/xe3lpd_dmc.bin` | 实机 v2.36 | 第一帧不要。走固件帧缓冲拷贝时 GOP 已经点着面板。xe 自己做 modeset 时再加载 |
 | DMC（display 30.02，WCL） | `i915/xe3lpd_3002_dmc.bin` | release 31 | 这次不覆盖 WCL |
@@ -187,11 +187,32 @@ vibe 的 README 写了：VM 显示是 VM 专有的；xe、LinuxKPI、sandbox 的
 
 1. **构建。** `harness/score.py` 增加 xe 模块，源是 Linux 6.14 的 `drivers/gpu/drm/xe`，DRM / TTM / dma-buf 仍用 drm-kmod `c16de0f`。显示代码先编进来，用开关在运行时停住。i915 和 xe 分开链，避免两个 `drmn`。
 2. **驱动名和探针。** 移植 vibe xkpi `0006`：`xe_pci_driver.name = "drmn"`。关掉 `ptl_desc.require_force_probe`。不移植 `0001`。
-3. **固件表。** 在 `xe_uc_fw.c` 加上 PTL 的 GuC（下限 70.54.0）和 HuC。kext Resources 放入 `ptl_guc_70.bin`（70.72.1）和 `ptl_huc.bin`。
+3. **固件表。** 在 `xe_uc_fw.c` 只加上 PTL 的 GuC（下限 70.54.0），M1 不定义 HuC 的 fw_def。kext Resources 只放入 `ptl_guc_70.bin`（70.72.1）。定义了 HuC 路径但文件缺失会让 `xe_huc_init` 返回 `-ENOENT` 导致 probe 失败，认证失败在 6.14 会走到 `xe_gt_assert`。GSC/HuC 认证留到后期（第 18 步）。
 4. **runtime PM。** 确认 FreeBSD `linux_pm.c` 的 `pm_runtime_get_if_active` / `pm_runtime_get_if_in_use`。若返回 `-EINVAL`，按 vibe `0011` 改 `xe_pm.c`：运行态下 `pm_runtime_get_noresume()` 并返回成功。G2H worker 靠这个。
 5. **非连续内核映射。** 用两段不相邻的页做和 stage 1 一样的 vmap 自测。失败则把 vibe `0012` 接到 `xg_vm.cpp`。`xe_lrc_init` 的 memcpy 会走到这里。
-6. **不动面板。** xe display 初始化加一个默认开启的跳过开关，作用对齐 `i915_xegfx_no_display`。stolen / GGTT 分配避开 stage 2 记下来的 GOP 画面（对齐 `xg_stolen_start`）。stage 4 之后读 pipe A 的帧计数，扫描停了就判失败。
-7. **通过标准。** 两个 GT 都报告 GuC 在跑（实机是 70.72.1）。各引擎一次空提交能完成，中断经现有 MSI 路径进来。HuC 允许处于未认证。
+6. **不动面板。** xe display 初始化加一个默认开启的跳过开关，作用对齐 `i915_xegfx_no_display`。stolen 分配避开 stage 2 记下来的 GOP 画面（对齐 `xg_stolen_start`）。GGTT 初始化之前（`xe_ggtt_initial_clear` 把空洞清成 scratch 之前）按 `PLANE_SURF` 读出 GOP 帧缓冲的 GGTT 区间，插入一个 `drm_mm` 保留节点，同时覆盖 stolen 和 GGTT PTE 两部分。stage 4 之后读 pipe A 的帧计数，扫描停了就判失败；再核对 xe 加载前后 GOP 区间的 GGTT PTE 和像素校验值不变（帧计数发现不了 GGTT 被清成 scratch）。
+7. **通过标准。** 两个 GT 都报告 GuC 在跑（实机是 70.72.1）。各引擎一次空提交能完成，中断经现有 MSI 路径进来。HuC 保持 `NOT_SUPPORTED`（不定义 fw_def），不做认证。
+
+**必须回移的 B0 WA（M1 配 6.14，顺序按 bring-up 挂死概率）。** A0–B0 区间的 WA 不移植（RTP 区间左闭右开，不含 B0）。下面这些在 B0 上生效，6.14 缺失：
+
+- `14025515070`（优先）：6.14 在 Xe3 上默认开 indirect ring state 且无缓解。M1 对 PTL 强制 `has_indirect_ring_state=0`（上游 v7.2 用 GuC ≥ 70.53 下发 ADS KLV `0x900e` 缓解，`f9a21696e37b`）。
+- `16023105232`：所有引擎设 `RING_PSMI_CTL` 的 `RC_SEMA_IDLE_MSG_DISABLE`（bit 12），并回移 IDLEDLY 计算逻辑（`7c53ff050ba8`，v6.15）。
+- `14023061436`：RCS/CCS 的 `TDL_CHICKEN`（0xe5f4）`QID_WAIT_FOR_THREAD_NOT_RUN_DISABLE`（bit 12）（`92029e0baa53`，v6.15）。
+- `16028005424`：所有 GT 设 `GUC_INTR_CHICKEN`（0xc50c）的 `DISABLE_SIGNALING_ENGINES`（bit 1）（v7.0）。
+- `13012615864`：`TDL_TSL_CHICKEN`（0xe4c4）`RES_CHK_SPR_DIS`（bit 6）（`2399bcc07c01`，v6.15）。
+- `13011645652`：6.14 已有 ADS KLV `0x9008` 代码，只需把 OOB 规则扩到 3000（`6fc957185e16`，v6.17 覆盖 30.00）。
+- `16026007364`：media 30.00 的 KLV `0x900c`（`d72779c29d82`，v6.18；M2–M4 不用 media，但 GT1 仍进出 RC6）。
+- `14025883347`：GuC-only reset 时 GuC DMA 失败（`c57db41b8d2c`，v7.1）。kext 卸载重载时 GuC 仍在跑，`xe_uc_sanitize_reset` 会触发，开发循环里会遇到。
+- `14022293748`：KLV `0x9009`（`32af900f2c6b`，v6.15；6.14 规则只覆盖 LNL，扩展规则即可）。
+
+### 上实机后首先验证
+
+issue #11 的机器能进系统后，先做这三项再往下走：
+
+1. `B080` 实际的 GMD_ID 和 stepping（GMD_ID 寄存器 0x132000 / 0x380000），确认是否和 `B082` 一样落在 30.00。
+2. GuC 70.72.1 在 6.14 的 ADS/CT 代码上是否可用（6.14 是 LNL 时期的代码，上游 PTL 最低是 v6.17 的 70.47.0；M1 开 GuC log 并核对 ADS 大小）。
+3. Mesa 26.x ANV 的 xe backend 与 6.14 xe uAPI 的兼容性（M2 前先在 Linux 6.14 上跑一次 ANV xe 后端冒烟测试做对照）。
+
 
 ### 里程碑 2：接到现有 ANV 和 Metal 插件
 
@@ -228,10 +249,10 @@ vibe 的 README 写了：VM 显示是 VM 专有的；xe、LinuxKPI、sandbox 的
 |---|---|---|---|
 | 1 | harness 编 Linux 6.14 xe，直接编上游 `xe_pt_walk`；i915/xe 的 `drmn` 分开链 | drm-kmod `c16de0f` | kext 链上，尚未 probe |
 | 2 | `0006` 驱动名 `drmn`；关掉 `require_force_probe`；不加 `has_sriov` | 1 | 设备能 attach |
-| 3 | `xe_uc_fw.c` 的 PTL GuC/HuC 条目，下限 70.54.0；Resources 里放 70.72.1 和 `ptl_huc.bin` | 2 | 固件请求打到 kext 资源 |
+| 3 | `xe_uc_fw.c` 只加 PTL GuC 条目（下限 70.54.0，不定义 HuC），Resources 里只放 70.72.1 | 2 | 固件请求打到 kext 资源 |
 | 4 | `0011` runtime PM，G2H 不再被 `-EINVAL` 丢掉 | 3 | GuC 通信能完成 |
 | 5 | 非连续 vmap 自测，失败则移植 `0012` | 4 | `xe_lrc_init` 不再 fault |
-| 6 | 显示保持 GOP；stolen/GGTT 预留固件画面；GT0 和 GT1 的 GuC 都在跑 | 5 | 里程碑 1。面板仍是固件画面 |
+| 6 | 显示保持 GOP；stolen 预留 + GGTT 初始化前预留 GOP 区间（含 PTE/像素校验）；GT0 和 GT1 的 GuC 都在跑 | 5 | 里程碑 1。面板仍是固件画面 |
 | 7 | ANV xe backend 的 mmap（mesa `0001`）接到现有 `'N'` ioctl | 6 | Vulkan 设备能映射 BO |
 | 8 | `0048` 三条 LRC WA，`0049` G2H `READ_ONCE`/`WRITE_ONCE` | 7 | 渲染读回正确 |
 | 9 | `0033`/`0034` 非 WB 页刷出缓存；Xe2+ 压缩默认关 | 7 | 合成缓冲不被脏 cache line 盖住 |
@@ -241,9 +262,10 @@ vibe 的 README 写了：VM 显示是 VM 专有的；xe、LinuxKPI、sandbox 的
 
 ## 8. 风险
 
-- **6.14 的 IP 表短。** 只有 GMD_ID 3000/3001。主线还有 30.03–30.05。对不上的芯片会在 `handle_gmdid` 失败。B082 是 3000，这条路径是按它排的。
-- **6.14 没有 PTL 的 GSC 105。** 第一帧按 HuC 未认证来做。媒体和 PXP 要等固件表和 MEI proxy，或者换更新的 xe。换 7.x 的 xe 要先补 drm-kmod 没有的 DRM / TTM 符号，vibe 的 README 把这件事排除在当时的范围之外。点亮不走那条。
-- **display probe 会拆 GOP。** i915 在 Legion 上已经发生过。xe 的第一阶段必须把显示停在“不改扫描”的状态，并用 pipe 帧计数检查。
+- **GMD_ID 表够用，不是主要风险。** 6.14 有 graphics/media 3000/3001，B082 实测 30.00 正好落在里面。主线多出来的 30.03 是 WCL，30.04/30.05 是 xe3p 系列，都不是 PTL。B080 按 SKU 推断也是 30.00，等实机读一次 GMD_ID 确认。基线要上调的理由是 WA 缺失和固件处理，不是这张表：M1 留在 6.14 并配上第 6 节的 B0 WA 回移清单，中期把 xe 对齐到 v7.2（drm-kmod、DRM core、TTM 跟着升级的成本另算）。换 7.x 的 xe 要先补 drm-kmod 没有的 DRM / TTM 符号，vibe 的 README 把这件事排除在当时的范围之外。点亮不走那条。
+- **6.14 没有 PTL 的 GSC 105。** M1 不定义 HuC fw_def（状态 `NOT_SUPPORTED`），第一帧不做 HuC 认证。媒体和 PXP 要等固件表和 MEI proxy，或者换更新的 xe。
+- **display 关闭时 GGTT 初始化会清掉 GOP 映射。** `xe_ggtt_initial_clear` 把 GGTT 所有空洞写成 scratch，GOP 帧缓冲的 GGTT 映射会被抹掉，面板变黑或花屏，aperture 写入也会落到 scratch。pipe 帧计数照样增加，发现不了这个问题。第 6 步在 GGTT 初始化前预留 GOP 区间，并用 PTE 和像素校验值验收。
+- **display probe 会拆 GOP。** i915 在 Legion 上已经发生过。xe 的第一阶段必须把显示停在“不改扫描”的状态，并用 pipe 帧计数检查（帧计数只管扫描，不管上面的 GGTT 映射）。
 - **`withAddressRanges` 可能只映射第一段。** 不先做不相邻页的自测，第一次 `xe_lrc_init` 就是 kernel panic。
 - **两个 `drmn`。** 和 i915 编进同一个 kext 且都改名为 `drmn` 时，Arrow Lake 的绑定会被换掉。
 - **没有裸机对照。** VF 上的桌面不证明 WOPCM、双 GuC、stolen、显示中断。Framework 的机器还停在 OpenCore `EXITBS`（issue #11），驱动阶段无法在这块 PTL 上验证，直到 APIC 表换过。
