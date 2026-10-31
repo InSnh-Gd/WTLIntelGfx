@@ -209,7 +209,7 @@ vibe 的 README 写了：VM 显示是 VM 专有的；xe、LinuxKPI、sandbox 的
 
 issue #11 的机器能进系统后，先做这三项再往下走：
 
-1. `B080` 实际的 GMD_ID 和 stepping（GMD_ID 寄存器 0x132000 / 0x380000），确认是否和 `B082` 一样落在 30.00。
+1. `B080` 实际的 GMD_ID 和 stepping（graphics GMD_ID 寄存器 0xd8c，media 为 0x380000 + 0xd8c = 0x380d8c），确认是否和 `B082` 一样落在 30.00。**勘误：** 原文的 0x132000 / 0x380000 不是这两个 GMD_ID 的地址；0x380000 是 media GT 的 GSI 基址，读取时仍须加上 GMD_ID 的 0xd8c 偏移。
 2. GuC 70.72.1 在 6.14 的 ADS/CT 代码上是否可用（6.14 是 LNL 时期的代码，上游 PTL 最低是 v6.17 的 70.47.0；M1 开 GuC log 并核对 ADS 大小）。
 3. Mesa 26.x ANV 的 xe backend 与 6.14 xe uAPI 的兼容性（M2 前先在 Linux 6.14 上跑一次 ANV xe 后端冒烟测试做对照）。
 

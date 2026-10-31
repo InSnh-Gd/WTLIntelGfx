@@ -26,7 +26,8 @@ struct xg_xe_exec {
  long long ns[XG_XE_MAX_ENGINES];
  int err[XG_XE_MAX_ENGINES];
 };
-/* 1 present, 0 no active pipe, negative invalid; immutable after probe. */
+/* GGTT byte offset and page-aligned full footprint, including PLANE_OFFSET.
+ * 1 present, 0 no active pipe, negative invalid; immutable after probe. */
 int xg_xe_bootfb_get(unsigned long long *offset, unsigned long long *size);
 /* Physical bounding interval of all GOP pages, not a BAR address. */
 int xg_xe_bootfb_phys_get(unsigned long long *phys, unsigned long long *size);

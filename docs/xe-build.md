@@ -133,9 +133,16 @@ all of them protected. An image outside DSM changes nothing; an unknown active
 GOP location disables stolen and prevents GGTT initialization. Discrete GPUs
 and VFs do not use this integrated-memory exclusion.
 
-M1 accepts an active linear, uncompressed XRGB8888 firmware surface, using
-stride in 64-byte units times plane height. Tiled/compressed/other-format
-surfaces, missing PTEs, zero or oversized footprints (over 256 MiB), and ranges
+M1 accepts an enabled, linear, uncompressed XRGB8888 firmware surface without
+rotation or reflection. Linear stride is bits 11:0 of `PLANE_STRIDE_1_A`, in
+64-byte units. Stage 2 reads `PLANE_OFFSET_1_A` (0x701a4): X is bits 12:0 and Y
+is bits 28:16. It protects the page-aligned interval starting at `PLANE_SURF`
+with size `align_up((Y + height) * stride + X * 4, 4096)`, including the unused
+prefix and a conservative final row. GGTT reservation, physical-page bounding
+for stolen exclusion, and both checksums all use this same expanded footprint.
+Unsupported rotation/reflection/tiled/compressed/other-format surfaces log the
+rejected control/geometry values and fail capture. Missing PTEs, zero or
+oversized footprints (over 256 MiB), and ranges
 beyond the 4 GiB hardware GGTT fail stage 2 rather than reserving a guessed
 footprint. No active pipe is explicitly skipped. Hardware validation must
 confirm that the firmware uses this supported layout.
@@ -163,7 +170,7 @@ the hashes and the comparison result in the IORegistry.
 | 1 | Existing shim and vmap self-test |
 | 2 | PCI/plane/GMD probe, original GOP GGTT/physical range, PTE/pixel baselines |
 | 3 | Existing PCI/newbus/DMA initialization |
-| 4 | Attach, frame/PTE/pixel checks, per-GT GuC status and loaded release version, running/submission/forcewake status, step name; raw and decoded graphics GMD at 0x132000 and media at 0x380000; driver IP versions, named platform, devid/revid, MSI vector count/IRQ enable |
+| 4 | Attach, frame/PTE/pixel checks, per-GT GuC status and loaded release version, running/submission/forcewake status, step name; raw and decoded graphics GMD at 0xd8c and media at 0x380d8c; driver IP versions, named platform, devid/revid, MSI vector count/IRQ enable |
 | 5 | Empty MI_BATCH_BUFFER_END through a kernel exec queue per exposed hardware engine on every GT; submitted flag, fence seqno/completed seqno, nanoseconds, error; interrupt-count delta; GOP checks |
 | 6 | Logs `store not implemented for xe (M1)`, returns unsupported; GOP checks |
 | 7 | Accelerator-claim hook logs unsupported and never publishes `nmxgpu-claimed`; GOP checks if invoked |
@@ -181,12 +188,19 @@ existing IOKit shim GPU-interrupt counter (`xg_pci_irqs`); a nonzero delta is
 evidence of interrupt delivery during execution, not proof every engine
 completion caused its own interrupt.
 
-Each diagnostic GT uses a fresh 128 KiB device-managed batch pool. This avoids
+Each diagnostic GT reuses one 128 KiB device-managed batch pool. This avoids
 waiting indefinitely on the normal batch pool's unsignaled fences. It can hold
 all 32 diagnostic batches even if none can yet be reused. The batch allocation
 is freed against the scheduler's finished fence, including the timeout path,
-and failed queues are killed asynchronously. Pools remain until device teardown;
-retrying failed stage 5 allocates fresh pools. Normal kernel allocation and lock
+and failed VM-less queues are killed through their backend operation, which
+does not dereference a VM. Pools remain until device teardown; retries reuse
+the pool rather than allocating another pinned BO. An unfinished batch retains
+a fence reference; until it signals, retries fail with `-EBUSY` before queue or
+batch allocation. Pool creation errors are cached as well. The existing stage
+lock serializes pool access, and managed teardown drops the retained fence.
+Stage 4 reads `GMD_ID` through each GT's accessor while GT forcewake is held:
+graphics uses 0xd8c and the media accessor adds its 0x380000 GSI base, giving
+0x380d8c. These correct the former diagnostic offsets. Normal allocation and lock
 progress still rely on the shim; the existing stage watchdog remains necessary.
 
 ### Compatibility and symbol ownership
@@ -234,14 +248,18 @@ xe-only unresolved API remains. A final Darwin kext link still requires macOS.
 
 The xe count grows by two files: the stage execution helper and upstream GEM
 TTM helpers. Both object licence gates pass. `harness/test_xe_stages.py` runs
-seven host-side tests against the generated reservation code and actual checksum
+eleven host-side tests against the generated reservation code and actual checksum
 hash/sampling and PTE translation, including unaligned/overflow/out-of-range GGTT intervals and
-DSM overlap/non-overlap/prefix-base accounting, plus atomic lock downgrade, devres release-once and lifetime/wiring checks.
+DSM overlap/non-overlap/prefix-base accounting, offset/stride/page-alignment and
+unsupported-layout checks, VM-less error teardown, bounded pool reuse, GMD
+addresses/decoding, atomic lock downgrade, devres
+release-once and lifetime/wiring checks.
 Run it after the xe preparation/build. XNU `xg_kext.cpp` is checked both with
 and without `XEGFX_KMD_XE`; the other XNU C++ units are also syntax checked.
 Only the two documented older-SDK errors in `xg_pci.cpp` are excluded.
 Firmware basename scanning in `xg_misc.cpp` uses a local loop because the
-older public SDK does not declare `strrchr`. All 14 patches also pass a fresh
+older public SDK does not declare `strrchr`. The 15-patch series includes
+`0210-m1-exec-pool.patch` for the GT-owned diagnostic state and passes a fresh
 dry-run/application with zero fuzz/offsets. Both C builds have no duplicate
 strong external definitions.
 

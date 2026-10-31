@@ -290,6 +290,29 @@ xg_xe_bootfb_checksum(unsigned long long *ptes, unsigned long long *pixels)
  return rc;
 }
 
+static int
+xg_xe_bootfb_layout(uint32_t ctl, uint32_t stride_reg, uint32_t size_reg,
+    uint32_t offset_reg, uint32_t surf, uint64_t *size)
+{
+ /* M1 supports only enabled, linear XRGB8888 with no transform or compression. */
+ if (!(ctl & (1u << 31)) ||
+     (ctl & ((3u << 0) | (1u << 8) | (7u << 10) | (1u << 15) | (1u << 4))) ||
+     (ctl & (31u << 23)) != (4u << 24))
+  return -EOPNOTSUPP;
+ uint64_t stride = (stride_reg & 0xfff) * 64ull;
+ uint64_t height = ((size_reg >> 16) & 0x1fff) + 1;
+ uint64_t x_off = offset_reg & 0x1fff;
+ uint64_t y_off = (offset_reg >> 16) & 0x1fff;
+ if (!stride)
+  return -EINVAL;
+ /* Include the prefix and a conservative final row, then all touched pages. */
+ uint64_t bytes = ((y_off + height) * stride + x_off * 4 + 4095) & ~4095ull;
+ if (bytes > (256ull << 20) || (uint64_t)surf + bytes > (4ull << 30))
+  return -EOVERFLOW;
+ *size = bytes;
+ return 0;
+}
+
 /* Stage 2 only. Never infer physical DSM from the BAR2 CPU alias. */
 static int
 xg_xe_capture_bootfb(IOPCIDevice *gpu, IOMemoryMap *mm)
@@ -301,13 +324,17 @@ xg_xe_capture_bootfb(IOPCIDevice *gpu, IOMemoryMap *mm)
  gXeBootFound = -EINVAL;
  volatile uint32_t *r = (volatile uint32_t *)mm->getVirtualAddress();
  gXeBootSurf = r[0x7019c / 4] & ~0xfffu;
- /* M1 only accepts linear 32-bpp firmware surfaces. Refuse unknown layouts
-  * instead of guessing a footprint and leaving part of GOP allocatable. */
  uint32_t ctl = r[0x70180 / 4];
- if ((ctl & ((7u << 10) | (1u << 15) | (1u << 4))) || ((ctl >> 24) & 15) != 4 ||
-     !xg_boot_fb_size || xg_boot_fb_size > (256ull << 20) ||
-     (uint64_t)gXeBootSurf + xg_boot_fb_size > (4ull << 30))
-  return gXeBootFound;
+ uint32_t stride = r[0x70188 / 4], plane_size = r[0x70190 / 4];
+ uint32_t offset = r[0x701a4 / 4];
+ uint64_t bytes;
+ int err = xg_xe_bootfb_layout(ctl, stride, plane_size, offset, gXeBootSurf, &bytes);
+ if (err) {
+  IOLog("XeGfx: GOP rejected ctl=%#x stride=%#x size=%#x offset=%#x err=%d; requires enabled linear XRGB8888, no rotation/reflection/tiling/compression, valid bounded footprint\n",
+      ctl, stride, plane_size, offset, err);
+  return gXeBootFound = err;
+ }
+ xg_boot_fb_size = bytes;
  unsigned n = (unsigned)((xg_boot_fb_size + 4095) / 4096);
  unsigned long long *pa = (unsigned long long *)IOMalloc(n * sizeof(unsigned long long));
  if (!pa)
@@ -335,8 +362,9 @@ xg_xe_capture_bootfb(IOPCIDevice *gpu, IOMemoryMap *mm)
   return gXeBootFound = -ENOMEM;
  gXeBootFound = 1;
  gXeBaseline = xg_xe_bootfb_checksum(&gXePteSum, &gXePixelSum) == 0;
- IOLog("XeGfx: GOP probe GGTT=%#x phys=%#llx bytes=%llu PTE=%#llx pixels=%#llx baseline=%d\n",
-     gXeBootSurf, xg_boot_fb_phys, xg_boot_fb_size, gXePteSum, gXePixelSum, gXeBaseline);
+ IOLog("XeGfx: GOP probe GGTT=%#x phys=%#llx bytes=%llu stride=%u offset=(%u,%u) PTE=%#llx pixels=%#llx baseline=%d\n",
+     gXeBootSurf, xg_boot_fb_phys, xg_boot_fb_size, (stride & 0xfff) * 64,
+     offset & 0x1fff, (offset >> 16) & 0x1fff, gXePteSum, gXePixelSum, gXeBaseline);
  return gXeBaseline ? 0 : -EIO;
 }
 #endif
@@ -375,7 +403,8 @@ xg_probe(void)
 			volatile uint32_t *r = (volatile uint32_t *)mm->getVirtualAddress();
 			static const struct { const char *k; uint32_t off; } regs[] = {
 #ifdef XEGFX_KMD_XE
-				{ "gmd-id-graphics", 0x132000 }, { "gmd-id-media", 0x380000 },
+				{ "gmd-id-graphics", 0xd8c }, { "gmd-id-media", 0x380d8c },
+				{ "plane-offset-1-a", 0x701a4 },
 #else
 				{ "gmd-id-graphics", 0xd8c },
 #endif
@@ -399,13 +428,15 @@ xg_probe(void)
 				if (gPipeLit && (gSurfPte & 1)) {
 					/* linear stride is in 64-byte units; PLANE_SIZE holds height - 1 in bits 31:16 */
 					xg_boot_fb_phys = gSurfPte & 0x3ffffffff000ull;	/* GEN12_GGTT_PTE_ADDR_MASK */
-					xg_boot_fb_size = (uint64_t)(r[0x70188 / 4] & 0x7ff) * 64 * ((r[0x70190 / 4] >> 16) + 1);
+					xg_boot_fb_size = (uint64_t)(r[0x70188 / 4] & 0xfff) * 64 * ((r[0x70190 / 4] >> 16) + 1);
 					xg_put(d, "boot-fb-size", xg_boot_fb_size, 64);
 				}
 			}
 #ifdef XEGFX_KMD_XE
 			int fb = mm->getLength() >= (16ull << 20) ? xg_xe_capture_bootfb(gpu, mm) : -EIO;
 			if (fb < 0) rc = fb;
+			else if (gXeBootFound == 1)
+				xg_put(d, "boot-fb-size", xg_boot_fb_size, 64);
 #endif
 			mm->release();
 		} else {

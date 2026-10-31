@@ -2,6 +2,7 @@
 /* M1 diagnostics use the same kernel queue path as xe_gt_record_default_lrcs. */
 #include <linux/pci.h>
 #include <linux/dma-fence.h>
+#include <drm/drm_managed.h>
 #include "xe_bb.h"
 #include "xe_sa.h"
 #include "xe_device.h"
@@ -55,10 +56,6 @@ int xg_xe_state(struct xg_xe_state *st)
  st->irq_enabled = atomic_read(&xe->irq.enabled);
  st->vectors = pdev->msix_enabled ? xe->irq.msix.nvec : (pdev->msi_enabled ? 1 : 0);
  if (xe->drm.render) st->render_minor = xe->drm.render->index;
- /* These absolute tile MMIO offsets identify the two PTL IP blocks. */
- st->graphics_gmd = xe_mmio_read32(xe_root_tile_mmio(xe), XE_REG(0x132000));
- if (xe_device_get_root_tile(xe)->media_gt)
-  st->media_gmd = xe_mmio_read32(xe_root_tile_mmio(xe), XE_REG(0x380000));
  for_each_gt(gt, xe, id) {
   struct xg_xe_gt_state *g;
   struct xe_uc_fw *fw = &gt->uc.guc.fw;
@@ -68,7 +65,13 @@ int xg_xe_state(struct xg_xe_state *st)
   g = &st->gt[st->gts++];
   g->id = id;
   g->media = xe_gt_is_media_type(gt);
-  g->gmd = g->media ? st->media_gmd : st->graphics_gmd;
+  ref = xe_force_wake_get(gt_to_fw(gt), XE_FW_GT);
+  g->forcewake = xe_force_wake_ref_has_domain(ref, XE_FW_GT);
+  if (g->forcewake)
+   g->gmd = xe_mmio_read32(&gt->mmio, GMD_ID);
+  xe_force_wake_put(gt_to_fw(gt), ref);
+  if (g->media) st->media_gmd = g->gmd;
+  else st->graphics_gmd = g->gmd;
   g->arch = REG_FIELD_GET(GMD_ID_ARCH_MASK, g->gmd);
   g->release = REG_FIELD_GET(GMD_ID_RELEASE_MASK, g->gmd);
   g->revid = REG_FIELD_GET(GMD_ID_REVID, g->gmd);
@@ -77,9 +80,6 @@ int xg_xe_state(struct xg_xe_state *st)
   g->running = fw->status == XE_UC_FIRMWARE_RUNNING;
   g->submission = READ_ONCE(gt->uc.guc.submission_state.enabled) &&
                   !atomic_read(&gt->uc.guc.submission_state.stopped);
-  ref = xe_force_wake_get(gt_to_fw(gt), XE_FW_GT);
-  g->forcewake = xe_force_wake_ref_has_domain(ref, XE_FW_GT);
-  xe_force_wake_put(gt_to_fw(gt), ref);
   strscpy(g->step, xe_step_name(g->media ? xe->info.step.media : xe->info.step.graphics), sizeof(g->step));
   st->healthy &= g->running && g->submission && g->forcewake;
   for_each_hw_engine(hwe, gt, h) st->engines++;
@@ -88,7 +88,7 @@ int xg_xe_state(struct xg_xe_state *st)
       g->guc_status, g->guc_major, g->guc_minor, g->guc_patch, g->running, g->submission, g->forcewake);
  }
  st->healthy &= st->gts > 0 && st->irq_enabled && st->vectors > 0;
- printf("xegfx: xe platform=%s(%u) devid=%04x revid=%02x graphics=%u media=%u GMD[132000]=%#x GMD[380000]=%#x MSI vectors=%d irq-enabled=%d\n",
+ printf("xegfx: xe platform=%s(%u) devid=%04x revid=%02x graphics=%u media=%u GMD[0d8c]=%#x GMD[380d8c]=%#x MSI vectors=%d irq-enabled=%d\n",
      st->platform_name, st->platform, st->devid, st->revid, st->graphics_verx100, st->media_verx100,
      st->graphics_gmd, st->media_gmd, st->vectors, st->irq_enabled);
  xe_pm_runtime_put(xe);
@@ -96,9 +96,42 @@ int xg_xe_state(struct xg_xe_state *st)
  return 0;
 }
 
-/* A fresh device-managed pool cannot wait for someone else's unsignaled
- * fence. It has room for every possible diagnostic batch even if none frees.
- * On timeout the finished fence retains the allocation until reset completes. */
+struct xg_xe_exec_pool {
+ struct xe_sa_manager *manager;
+ struct dma_fence *pending;
+};
+
+static void xg_xe_exec_pool_fini(struct drm_device *drm, void *arg)
+{
+ struct xg_xe_exec_pool *state = arg;
+ dma_fence_put(state->pending);
+}
+
+/* gStageLock serializes diagnostics. Refuse retries until the last unfinished
+ * batch completes; otherwise SA allocation could wait forever behind it. */
+static struct xg_xe_exec_pool *xg_xe_exec_pool_get(struct xe_gt *gt)
+{
+ struct xg_xe_exec_pool *state = gt->m1_exec;
+ struct xe_device *xe = gt_to_xe(gt);
+ int err;
+ if (!state) {
+  state = drmm_kzalloc(&xe->drm, sizeof(*state), GFP_KERNEL);
+  if (!state) return ERR_PTR(-ENOMEM);
+  err = drmm_add_action_or_reset(&xe->drm, xg_xe_exec_pool_fini, state);
+  if (err) return ERR_PTR(err);
+  /* Cache failures too: retrying must not accumulate managed BOs. */
+  state->manager = xe_sa_bo_manager_init(gt_to_tile(gt), SZ_128K, 64);
+  gt->m1_exec = state;
+ }
+ if (IS_ERR(state->manager)) return ERR_CAST(state->manager);
+ if (state->pending) {
+  if (!dma_fence_is_signaled(state->pending)) return ERR_PTR(-EBUSY);
+  dma_fence_put(state->pending);
+  state->pending = NULL;
+ }
+ return state;
+}
+
 static struct xe_bb *xg_xe_bb_new(struct xe_sa_manager *pool)
 {
  struct xe_bb *bb = kzalloc(sizeof(*bb), GFP_KERNEL);
@@ -131,8 +164,8 @@ int xg_xe_exec(struct xg_xe_exec *ex, int timeout_ms)
  irq0 = READ_ONCE(xg_pci_irqs);
  deadline = jiffies + msecs_to_jiffies(20000);
  for_each_gt(gt, xe, id) {
-  struct xe_sa_manager *pool = xe_sa_bo_manager_init(gt_to_tile(gt), SZ_128K, 64);
   for_each_hw_engine(hwe, gt, h) {
+   struct xg_xe_exec_pool *state;
    struct xe_exec_queue *q;
    struct xe_bb *bb;
    struct xe_sched_job *job;
@@ -152,9 +185,11 @@ int xg_xe_exec(struct xg_xe_exec *ex, int timeout_ms)
    if (time_after_eq(jiffies, deadline)) {
     ex->err[n] = -ETIMEDOUT; ex->truncated = 1; goto report;
    }
+   state = xg_xe_exec_pool_get(gt);
+   if (IS_ERR(state)) { ex->err[n] = PTR_ERR(state); goto report; }
    q = xe_exec_queue_create(xe, NULL, BIT(hwe->logical_instance), 1, hwe, EXEC_QUEUE_FLAG_KERNEL, 0);
    if (IS_ERR(q)) { ex->err[n] = PTR_ERR(q); goto report; }
-   bb = IS_ERR(pool) ? ERR_CAST(pool) : xg_xe_bb_new(pool);
+   bb = xg_xe_bb_new(state->manager);
    if (IS_ERR(bb)) { ex->err[n] = PTR_ERR(bb); goto put_q; }
    /* xe_bb_create_job appends MI_BATCH_BUFFER_END to this empty batch. */
    job = xe_bb_create_job(q, bb);
@@ -170,9 +205,12 @@ int xg_xe_exec(struct xg_xe_exec *ex, int timeout_ms)
    else if (dma_fence_get_status(fence) < 0) ex->err[n] = dma_fence_get_status(fence);
    else { ex->completed[n] = ex->seqno[n]; ex->done++; }
    /* Defer suballocation reuse until FINISHED, including timeout/error paths. */
+   if (!dma_fence_is_signaled(fence))
+    state->pending = dma_fence_get(fence);
    xe_bb_free(bb, fence);
    dma_fence_put(fence);
-   if (ex->err[n]) xe_exec_queue_kill(q);
+   /* The common kill helper removes q from its VM; kernel queues have none. */
+   if (ex->err[n]) q->ops->kill(q);
 put_q:
    xe_exec_queue_put(q);
 report:

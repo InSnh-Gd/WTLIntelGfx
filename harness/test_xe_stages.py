@@ -25,6 +25,43 @@ class XeStages(unittest.TestCase):
                             '-fsanitize=undefined', str(c), '-o', exe], check=True)
             subprocess.run([exe], check=True, timeout=20)
 
+    def test_bootfb_actual_layout(self):
+        text = (ROOT / 'shim/src/xnu/xg_kext.cpp').read_text()
+        fn = between(text, 'static int\nxg_xe_bootfb_layout(',
+                     '\n/* Stage 2 only.')
+        self.compile_run('''
+#include <assert.h>
+#include <stdint.h>
+#include <errno.h>
+''' + fn + '''
+int main(void) {
+ uint64_t size;
+ const uint32_t ctl = (1u << 31) | (4u << 24);
+ assert(!xg_xe_bootfb_layout(ctl,120,1079u<<16,0,0x200000,&size));
+ assert(size==((7680ull*1080+4095)&~4095ull));
+ assert(!xg_xe_bootfb_layout(ctl,120,1079u<<16,(17u<<16)|33,0x200000,&size));
+ assert(size==((1097ull*7680+33*4+4095)&~4095ull));
+ /* Bit 11 of stride must survive; reserved offset bits must not. */
+ assert(!xg_xe_bootfb_layout(ctl,0x801,0,0xe000e000u,0,&size));
+ assert(size==((0x801ull*64+4095)&~4095ull));
+ assert(!xg_xe_bootfb_layout(ctl,1,0,(8191u<<16)|8191,0,&size));
+ assert(size==((8192ull*64+8191*4+4095)&~4095ull));
+ /* X offset can require one more page after a page-aligned row span. */
+ assert(!xg_xe_bootfb_layout(ctl,64,0,1,0,&size) && size==8192);
+ for (unsigned i=0;i<32;i++) {
+  uint32_t bit=1u<<i;
+  if (bit & ((3u<<0)|(1u<<8)|(7u<<10)|(1u<<15)|(1u<<4)))
+   assert(xg_xe_bootfb_layout(ctl|bit,120,0,0,0,&size)==-EOPNOTSUPP);
+ }
+ assert(xg_xe_bootfb_layout(ctl|(1u<<23),120,0,0,0,&size)==-EOPNOTSUPP);
+ assert(xg_xe_bootfb_layout(ctl&~(1u<<31),120,0,0,0,&size)==-EOPNOTSUPP);
+ assert(xg_xe_bootfb_layout(ctl,0,0,0,0,&size)==-EINVAL);
+ assert(xg_xe_bootfb_layout(ctl,0xfff,8191u<<16,8191u<<16,0,&size)==-EOVERFLOW);
+ assert(xg_xe_bootfb_layout(ctl,64,0,1,0xfffff000u,&size)==-EOVERFLOW);
+ assert(!xg_xe_bootfb_layout(ctl,64,0,0,0xfffff000u,&size) && size==4096);
+}
+''')
+
     def test_ggtt_actual_reservation_block(self):
         block = between((XE / 'xe_ggtt.c').read_text(),
                         '\t/* Before first allocation', '\n\tif (IS_SRIOV_VF(xe)) {')
@@ -276,10 +313,137 @@ int main(void) {
         self.assertIn('xe_bb_free(bb, fence)', ex)
         self.assertNotIn('xe_bb_free(bb, NULL);\n   dma_fence_put', ex)
         self.assertIn('SZ_128K', ex)
+        self.assertNotIn('xe_exec_queue_kill(q)', ex)
+        self.assertIn('if (ex->err[n]) q->ops->kill(q);', ex)
+        self.assertIn('state->pending = dma_fence_get(fence)', ex)
+        self.assertLess(ex.index('xg_xe_exec_pool_get(gt)'),
+                        ex.index('q = xe_exec_queue_create'))
+        self.assertIn('g->gmd = xe_mmio_read32(&gt->mmio, GMD_ID)', ex)
+        self.assertNotIn('XE_REG(0x132000)', ex)
+        self.assertNotIn('XE_REG(0x380000)', ex)
         display = (XE / 'display/xe_display.c').read_text()
         probe = between(display, 'int xe_display_probe(', '\nno_display:')
         self.assertLess(probe.index('if (!xe->info.probe_display)'), probe.index('intel_display_device_probe'))
         self.assertIn('.probe_display = false', (ROOT / 'xkpi/xe/src/xg_xe_module.c').read_text())
+
+    def test_exec_pool_actual_reuse(self):
+        text = (ROOT / 'xkpi/xe/src/xg_xe_exec.c').read_text()
+        code = between(text, 'struct xg_xe_exec_pool {',
+                       '\nstatic struct xe_bb *xg_xe_bb_new')
+        self.compile_run('''
+#include <assert.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <stdint.h>
+#define GFP_KERNEL 0
+#define SZ_128K (128*1024)
+#define ERR_PTR(e) ((void *)(intptr_t)(e))
+#define PTR_ERR(p) ((int)(intptr_t)(p))
+#define IS_ERR(p) ((uintptr_t)(p) >= (uintptr_t)-4095)
+#define ERR_CAST(p) ((void *)(p))
+struct dma_fence { int signaled, refs; };
+struct xe_sa_manager { int unused; };
+struct xg_xe_exec_pool;
+struct xe_gt { struct xg_xe_exec_pool *m1_exec; };
+struct drm_device { int unused; };
+struct xe_device { struct drm_device drm; };
+static struct xe_device xe;
+static int allocs, managers, fail_manager;
+static void (*release_state)(struct drm_device *,void *);
+static void *release_arg;
+static struct xe_device *gt_to_xe(struct xe_gt *gt) { return &xe; }
+static void *gt_to_tile(struct xe_gt *gt) { return gt; }
+static void *drmm_kzalloc(struct drm_device *drm,size_t n,int flags) { allocs++; return calloc(1,n); }
+static int drmm_add_action_or_reset(struct drm_device *drm,void (*fn)(struct drm_device *,void *),void *arg) {
+ release_state=fn; release_arg=arg; return 0;
+}
+static struct xe_sa_manager manager;
+static struct xe_sa_manager *xe_sa_bo_manager_init(void *tile,unsigned n,unsigned align) {
+ assert(n==SZ_128K && align==64); managers++;
+ return fail_manager ? ERR_PTR(-ENOMEM) : &manager;
+}
+static int dma_fence_is_signaled(struct dma_fence *f) { return f->signaled; }
+static void dma_fence_put(struct dma_fence *f) { if(f) { assert(f->refs>0); f->refs--; } }
+''' + code + '''
+int main(void) {
+ struct xe_gt gt={0}, failed={0};
+ struct dma_fence f={0,1};
+ struct xg_xe_exec_pool *s=xg_xe_exec_pool_get(&gt);
+ assert(!IS_ERR(s) && allocs==1 && managers==1);
+ assert(xg_xe_exec_pool_get(&gt)==s && managers==1);
+ s->pending=&f;
+ for(int i=0;i<100;i++) assert(PTR_ERR(xg_xe_exec_pool_get(&gt))==-EBUSY);
+ assert(managers==1 && allocs==1 && f.refs==1);
+ f.signaled=1;
+ assert(xg_xe_exec_pool_get(&gt)==s && !s->pending && f.refs==0);
+ assert(managers==1);
+ f.refs=1; s->pending=&f;
+ release_state(&xe.drm,release_arg);
+ assert(f.refs==0); free(s);
+ fail_manager=1;
+ assert(PTR_ERR(xg_xe_exec_pool_get(&failed))==-ENOMEM);
+ for(int i=0;i<100;i++) assert(PTR_ERR(xg_xe_exec_pool_get(&failed))==-ENOMEM);
+ assert(managers==2 && allocs==2);
+ release_state(&xe.drm,release_arg); free(failed.m1_exec);
+}
+''')
+
+    def test_kernel_queue_actual_error_cleanup(self):
+        text = (ROOT / 'xkpi/xe/src/xg_xe_exec.c').read_text()
+        cleanup = between(text, '   /* The common kill helper', '\nreport:')
+        self.compile_run('''
+#include <assert.h>
+#include <errno.h>
+#include <stddef.h>
+struct queue;
+struct ops { void (*kill)(struct queue *); };
+struct queue { void *vm; struct ops *ops; int refs, kills; };
+struct result { int err[1]; };
+static void kill(struct queue *q) { assert(!q->vm && q->refs==1); q->kills++; }
+static void xe_exec_queue_put(struct queue *q) { assert(q->refs==1); q->refs--; }
+static void cleanup(struct queue *q,int err,int allocation_failed) {
+ struct result result={{err}}, *ex=&result; int n=0;
+ if(allocation_failed) goto put_q;
+''' + cleanup + '''
+}
+int main(void) {
+ struct ops ops={kill};
+ const int errors[]={0,-ETIMEDOUT,-EIO};
+ for(int i=0;i<3;i++) {
+  struct queue q={NULL,&ops,1,0}; cleanup(&q,errors[i],0);
+  assert(q.refs==0 && q.kills==(errors[i]!=0));
+ }
+ struct queue q={NULL,&ops,1,0}; cleanup(&q,-ENOMEM,1);
+ assert(q.refs==0 && q.kills==0);
+}
+''')
+
+    def test_actual_gmd_registers_and_decode(self):
+        regs = (XE / 'regs/xe_gt_regs.h').read_text()
+        definitions = '\n'.join(line for line in regs.splitlines()
+                                if line.startswith('#define MEDIA_GT_GSI_OFFSET') or
+                                line.startswith('#define GMD_ID\t') or
+                                line.startswith('#define   GMD_ID_'))
+        self.compile_run('''
+#include <assert.h>
+#include <stdint.h>
+#define XE_REG(v) (v)
+#define REG_GENMASK(h,l) ((UINT32_MAX >> (31-(h))) & (UINT32_MAX << (l)))
+#define REG_FIELD_GET(mask,v) (((v)&(mask)) >> __builtin_ctz(mask))
+''' + definitions + '''
+int main(void) {
+ assert(GMD_ID==0xd8c && GMD_ID+MEDIA_GT_GSI_OFFSET==0x380d8c);
+ for(unsigned release=0;release<2;release++) {
+  uint32_t gmd=(30u<<22)|(release<<14)|4u;
+  assert(REG_FIELD_GET(GMD_ID_ARCH_MASK,gmd)==30);
+  assert(REG_FIELD_GET(GMD_ID_RELEASE_MASK,gmd)==release);
+  assert(REG_FIELD_GET(GMD_ID_REVID,gmd)==4);
+ }
+}
+''')
+        kext = (ROOT / 'shim/src/xnu/xg_kext.cpp').read_text()
+        self.assertIn('{ "gmd-id-graphics", 0xd8c }', kext)
+        self.assertIn('{ "gmd-id-media", 0x380d8c }', kext)
 
 
 if __name__ == '__main__':

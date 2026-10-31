@@ -1,0 +1,24 @@
+Purpose: retain one diagnostic batch pool per GT across stage-5 retries.
+The shim serializes stage execution; the private state also retains the last
+unfinished fence to reject retries without blocking in the suballocator.
+
+--- a/xe_gt_types.h
++++ b/xe_gt_types.h
+@@ -22,6 +22,7 @@
+ struct xe_exec_queue_ops;
+ struct xe_migrate;
+ struct xe_ring_ops;
++struct xg_xe_exec_pool;
+ 
+ enum xe_gt_type {
+ 	XE_GT_TYPE_UNINITIALIZED,
+@@ -115,6 +116,9 @@
+ 	/** @tile: Backpointer to GT's tile */
+ 	struct xe_tile *tile;
+ 
++	/** @m1_exec: shim-owned diagnostics, serialized by the stage lock */
++	struct xg_xe_exec_pool *m1_exec;
++
+ 	/** @info: GT info */
+ 	struct {
+ 		/** @info.type: type of GT */
