@@ -29,7 +29,8 @@ objects from the other driver. Run the complete object build before linking.
   These adapt BAR sizing, drm_file/TTM fields, worker user copies, clock reader
   signatures, PCI registration, PM debug/bridge checks and the ACPI include.
 - `patches/*.patch` are applied with `patch -p1` in lexical order after the
-  fork edits. The caller's 13 patches, 0100-0157, are included unchanged;
+  fork edits. The original 13 patches, 0100-0157, are included unchanged;
+  0158/0159 add the selected vibe LRC and fence fixes.
   their PTL behavior and sources are described in [xe-ptl-patches.md](xe-ptl-patches.md).
 - The host `cc` builds `xe_gen_wa_oob.c`; each `*wa_oob.rules` generates C/H
   tables in `out/xe-gen/generated`. Linux 6.14 has `xe_wa_oob.rules` only.
@@ -66,6 +67,9 @@ policy and passes with no GPL-only inputs. A direct gate check verified that
 `xe_pt_walk.c` is rejected under i915 and accepted under xe.
 
 ## macOS build verification
+
+This section records the build before the vibe integration below. Its final
+kext link/signature results do not validate the newer mapping/cache changes.
 
 On macOS Tahoe 26.7.2 (25G332), an x86_64 QEMU VM built the xe and i915
 kexts with Command Line Tools 26.6, Apple clang 21 and the macOS 26.5 SDK:
@@ -267,7 +271,62 @@ C build and three explicitly supplied by the existing XNU kext compilation:
 bridge imports, not missing compatibility implementations. No original
 xe-only unresolved API remains. A final Darwin kext link still requires macOS.
 
-## Scoreboard (2026-11-01)
+## Vibe integration verification
+
+On 2026-11-01 the selected bare-metal fixes from
+`ericek111/vibe-nullmoth-xe3-qemu@7246d386e94a2f5e8fe4f8a17099d11514b0ae40`
+were integrated. The xe build now also compiles `xg_i915_map.c` with
+`XEGFX_KMD_XE=1` and the generic `xg_drm_sync.c`. Stage 4 registers its map,
+PCI-info and fence callbacks. The mapping owns a GEM reference and TTM pin;
+unmap or final file release destroys the IOKit map before unpinning. File
+cleanup runs on the last reference, after any in-flight ioctl has returned.
+
+The new LinuxKPI page/highmem overrides flush dirty non-WB kernel aliases on
+clear/unmap, including direct TTM clear and memcpy-to-page helpers. Higher
+order `__GFP_NORETRY` attempts return NULL so TTM can fall back to single
+pages without entering XNU's expensive contiguous allocator.
+
+Verification used Linux-host clang 23.1.4 to emit Mach-O C objects for the
+existing `x86_64-apple-macos15.0` freestanding kernel target, with the harness's
+source lists and flags. The harness module was imported with `SRC`, `KMOD`
+and `LKPI` pointing to separate verification sources; clang was called
+directly because this host has no `xcrun`. Machine/x86 header links were
+provided under `out/verify/fbsd`. Sources were:
+
+- Linux v6.14 `38fec10eb60d687e30c8c6b5420d86e8149f7557`.
+- drm-kmod `c16de0f9fa`.
+- FreeBSD `9da2c05a748fd17757638e1a9e78215cdb8b80d0`.
+- Mesa `bffd91947efc1932da99aca69fc540d6d4201b0c`, for patch application.
+
+| Check | Result |
+| --- | --- |
+| xe C objects, including shared bridge | 342/342 |
+| i915 C objects | 422/422 |
+| Object licence gates | Both pass, no unapproved inputs |
+| Duplicate strong external definitions | None in either build |
+| Newly introduced map/cache API imports | All resolved in the C object set |
+| Host regression suite | 16/16, including 5 new tests with UB sanitizer |
+| Fresh xe preparation | 17 patches, no fuzz or offsets; OOB tables generated |
+| Fresh Mesa base + `mesa-macos.patch` + `mesa-xegfx.patch` | `git apply --check` and application pass |
+
+The C-only unresolved sets contain 110 imports for xe and 109 for i915. The
+xe-only ones relative to i915 are the three existing XNU-side bridges
+`xg_pci_irqs`, `xg_xe_bootfb_get` and `xg_xe_bootfb_phys_get`; i915 instead
+imports the two existing boot framebuffer globals. Existing FreeBSD atomic
+header pointer-sign warnings remain visible in shim compilation. No warning
+suppression was added for this integration.
+
+Evidence is in `out/verify/final-objects.log` and `out/verify/host-tests.log`.
+Run `python3 harness/test_xe_stages.py` after source preparation to reproduce
+the host regressions. The normal macOS build commands at the top of this
+document remain the way to produce the final kext. This run did not compile
+the XNU C++ units, link/sign a new kext, rebuild ANV, load a driver, or run a
+PTL GPU. Native system-memory BOs are the supported map scope; imported,
+VRAM, stolen and placed mappings are rejected. Userptr/IOSurface import and
+async user-fence writes remain separate, pre-existing gaps. Full provenance
+and remaining integration boundaries are in [vibe-nullmoth-reuse.md](vibe-nullmoth-reuse.md).
+
+## Earlier scoreboard (2026-11-01, before vibe integration)
 
 | Selection | Driver syntax | Complete syntax | Driver objects | Complete objects | C-only unresolved |
 | --- | ---: | ---: | ---: | ---: | ---: |
