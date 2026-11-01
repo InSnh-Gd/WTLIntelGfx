@@ -1,0 +1,19 @@
+Purpose: make concurrent GuC response completion accesses explicit.
+Source: ericek111/vibe-nullmoth-xe3-qemu@7246d386e94a2f5e8fe4f8a17099d11514b0ae40,
+  patches/xkpi/0049 (ericek111, 0b1a8669b0fe2a9f9a4cc23bbb19b5c4b8f4b4bd).
+Adaptation: keep the original 6.14 IRQ wait; no VF polling dependency.
+
+--- a/xe_guc_ct.c
++++ b/xe_guc_ct.c
+@@ -1022,4 +1022,4 @@
+-	ret = wait_event_timeout(ct->g2h_fence_wq, g2h_fence.done, HZ);
++	ret = wait_event_timeout(ct->g2h_fence_wq, READ_ONCE(g2h_fence.done), HZ);
+ 	if (!ret) {
+ 		LNL_FLUSH_WORK(&ct->g2h_worker);
+-		if (g2h_fence.done) {
++		if (READ_ONCE(g2h_fence.done)) {
+@@ -1204,3 +1204,3 @@
+-	g2h_fence->done = true;
++	WRITE_ONCE(g2h_fence->done, true);
+ 	smp_mb();
+ 

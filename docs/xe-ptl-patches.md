@@ -34,6 +34,15 @@ No patch changes `include/drm/intel/pciids.h` or enables SR-IOV.
 | `0155-wa-16026007364.patch` | `d72779c29d82`, drm/xe/ptl: Apply Wa_16026007364 | Enable media-3000 KLV 0x900c with payload words `{0, 0xf}` | Add the ABI key and checked two-word ADS helper; retain GuC >= 70.47.0 guard |
 | `0156-wa-14025883347.patch` | `c57db41b8d2c`, drm/xe/guc: Add Wa_14025883347 for GuC DMA failure on reset | Disable GuC idle flow and wait for ready/SRAM completion before reset | Use 6.14 `XE_WA` instead of `XE_GT_WA`; keep existing forcewake and VF ordering |
 | `0157-wa-14022293748.patch` | `32af900f2c6b`, drm/xe/xe3lpg: Apply Wa_14022293748, Wa_22019794406 | Enable existing KLV 0x9009 on graphics 3000-3001 | Extend only Wa_14022293748; retain the base ADS code |
+| `0158-xe3-lrc-workarounds.patch` | vibe `7246d38`, xkpi `0048` | Add LRC Wa_14026781792, Wa_22021007897 and Wa_14024681466 | Preserve render-only rules, IP 3000-3510 for the first and 3000-3005 for the other two; add the masked MCR register definition |
+| `0159-guc-fence-once.patch` | vibe `7246d38`, xkpi `0049` | Use READ_ONCE/WRITE_ONCE for concurrent G2H completion | Keep the single 6.14 IRQ wait and its existing barrier; no early VF polling |
+
+The 0158/0159 additions were integrated on 2026-11-01. All 17 patches
+(0100-0159 plus 0200/0210) apply to a fresh v6.14 copy after `fork_xe.py`
+without fuzz or offsets. Their generated C objects compile with the rest of
+the xe C build; see [integration verification](xe-build.md#vibe-integration-verification).
+Source attribution is retained in each patch. Register programming and GuC
+completion on physical PTL are not established by these build checks.
 
 The local PCI list is exactly
 `B080 B081 B082 B083 B084 B085 B086 B087 B08F B090 B0A0 B0A1 B0B0`.
