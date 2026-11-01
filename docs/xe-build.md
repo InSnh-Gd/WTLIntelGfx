@@ -65,16 +65,44 @@ explicit xe owner policy, alongside the walker and helper headers. The i915 gate
 policy and passes with no GPL-only inputs. A direct gate check verified that
 `xe_pt_walk.c` is rejected under i915 and accepted under xe.
 
+## macOS build verification
+
+On macOS Tahoe 26.7.2 (25G332), an x86_64 QEMU VM built the xe and i915
+kexts with Command Line Tools 26.6, Apple clang 21 and the macOS 26.5 SDK:
+
+```sh
+export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
+XEGFX_KMD=xe build/build_xegfx.sh
+python3 harness/test_xe_stages.py
+XEGFX_KMD=i915 build/build_xegfx.sh
+```
+
+The xe build compiled 340/340 sources and passed the licence, link, KPI and
+shadow checks. The i915 build also passed the build, link, KPI and shadow
+checks. The stage host tests passed 11/11. Both kexts passed `codesign
+--verify`; each build emitted nine XNU C++ warnings. The FreeBSD source tree
+used for this run was an unpinned `main` snapshot, so the result does not pin
+the LinuxKPI dependency. The VM did not have a Panther Lake GPU and the kext
+was not loaded; probe, GuC operation and rendering remain unverified.
+
+The build expects Linux v6.14 xe and its `include/uapi/drm/xe_drm.h`,
+drm-kmod at `c16de0f`, FreeBSD kernel and LinuxKPI sources, and WTLKcAbi at
+`~/src/kcabi`. The firmware used for this run came from linux-firmware
+`bda6eccc3a8f`: PTL GuC 70.72.1 and MTL GuC 70.53.0. Firmware licences are
+under `LICENSES/` in that snapshot; place the relevant licence at the root
+of the `linux-firmware` directory expected by the linker.
+
 ## Firmware and verification limits
 
 For xe, `tools/link.sh` adds `-DXEGFX_KMD_XE=1` to XNU C++ compilation,
 embeds `xe/ptl_guc_70.bin` under `ptl_guc_70.bin`, and copies that blob plus
 `LICENSE.xe` into Resources. i915 retains `mtl_guc_70.bin` and `LICENSE.i915`.
-Both firmware entry points strip directory prefixes before lookup.
+Both firmware entry points strip directory prefixes before lookup. The i915
+image is expected at the firmware directory root, whereas the xe image is
+expected under `xe/`. The linker permits missing firmware and emits an empty
+firmware table, so a successful build alone does not prove the image is
+present. Check `out/XeGfx.kext/Contents/Resources/` before testing hardware.
 
-`bash -n tools/link.sh build/build_xegfx.sh` passes. The macOS link script
-was not executed on Linux. These results establish compilation, not kext
-linking, PTL probe, GuC operation, rendering or hardware correctness.
 Worker-thread user copies return all bytes uncopied until a task-map copy
 implementation exists. MEI, ftrace, VSEC, Linux sysctl tables and anonymous
 OA file descriptors are unavailable; the xe headers document their answers.
