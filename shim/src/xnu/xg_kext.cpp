@@ -719,7 +719,9 @@ xg_run_stage(int s)
 			if (rc == 1 && !xg_drm_attached())
 				rc = -19;	/* the init routines ran but no drm driver bound the GPU */
 			if (rc == 1) {
-#ifndef XEGFX_KMD_XE
+#ifdef XEGFX_KMD_XE
+				xg_xe_map_init();
+#else
 				xg_i915_map_init();
 #endif
 				rc = xg_gt_check();

@@ -86,6 +86,9 @@ def sources(root, src, kcfg):
             out.append(str(p))
     drop = {l.split('#')[0].strip() for l in (root / 'xkpi/xe/exclude.txt').read_text().splitlines()}
     out.append(str(src / 'drm-kmod/drivers/gpu/drm/drm_gem_ttm_helper.c'))
+    # The Darwin map ABI and GEM/syncobj bridge are shared with i915.
+    out.extend(str(root / 'xkpi/src/i915' / name) for name in
+               ('xg_i915_map.c', 'xg_drm_sync.c'))
     return list(dict.fromkeys(p for p in out if pathlib.Path(p).name not in drop)) + [
         str(p) for p in sorted((root / 'xkpi/xe/src').glob('*.c'))]
 
@@ -102,4 +105,4 @@ def flags(root, src):
                'DRM_XE_PREEMPT_TIMEOUT_MIN': '1', 'DRM_XE_ENABLE_SCHEDTIMEOUT_LIMIT': '1'}
     return [v for p in inc for v in ('-I', str(p))] + [
         '-include', str(root / 'xkpi/xe/include/xg_xe_compat.h'),
-        '-DDRM_SYSCTL_PARAM_PREFIX=_xe', '-Ddrm_i915_private=xe_device', '-DKBUILD_MODNAME="xe"', '-DLINUXKPI_PARAM_PREFIX=xe_'] + ['-DCONFIG_' + k + '=' + v for k, v in configs.items()]
+        '-DXEGFX_KMD_XE=1', '-DDRM_SYSCTL_PARAM_PREFIX=_xe', '-Ddrm_i915_private=xe_device', '-DKBUILD_MODNAME="xe"', '-DLINUXKPI_PARAM_PREFIX=xe_'] + ['-DCONFIG_' + k + '=' + v for k, v in configs.items()]

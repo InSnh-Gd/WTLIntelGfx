@@ -133,6 +133,140 @@ int main(void) {
 }
 ''')
 
+    def test_xe_map_failure_and_pin_lifetime(self):
+        text = (ROOT / 'xkpi/src/i915/xg_i915_map.c').read_text()
+        code = between(text, 'static int\nxg_map_mmap(', '\n#endif\n\nstatic int\nxg_map_munmap(')
+        code = code[code.index('#else\n') + len('#else\n'):]
+        release = between(text, 'static void\nxg_map_free(', '\n#ifndef XEGFX_KMD_XE')
+        self.compile_run('''
+#include <assert.h>
+#include <stdint.h>
+#include <limits.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <stddef.h>
+typedef uint64_t u64; typedef uint32_t u32;
+#define PAGE_SHIFT 12
+#define PAGE_SIZE 4096ull
+#define GFP_KERNEL 0
+#define XE_BO_FLAG_SYSTEM 2
+#define XE_PL_TT 1
+#define DRM_XE_GEM_CPU_CACHING_WB 1
+#define XG_VM_CACHE_WB 1
+#define XG_VM_CACHE_WC 2
+#define XG_PROT_WRITE 2
+#define XEGFX_KMD_XE 1
+#define DMA_RESV_USAGE_KERNEL 0
+#define MAX_SCHEDULE_TIMEOUT LONG_MAX
+#define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
+struct list_head { int unused; };
+struct drm_vma_offset_node { u64 offset; };
+struct drm_gem_object { struct drm_vma_offset_node vma_node; u64 size; int refcount; void *resv,*import_attach; };
+struct page { u64 pa; };
+struct ttm_tt { unsigned num_pages; struct page **pages; };
+struct ttm_buffer_object { struct drm_gem_object base; struct ttm_tt *ttm; void *bdev; int pin_count; };
+struct xe_bo { struct ttm_buffer_object ttm; unsigned flags,cpu_caching; };
+struct drm_device { void *vma_offset_manager; };
+struct drm_minor { struct drm_device *dev; };
+struct drm_file { struct drm_minor *minor; };
+struct file { void *private_data; };
+struct xg_drm_mmap { u64 offset,size; u32 prot,flags; u64 addr; };
+struct xg_map { struct list_head link; void *key; u64 addr,size; void *xm; struct xe_bo *obj; };
+struct ttm_operation_ctx { bool interruptible; };
+static struct xe_bo bo;
+static int found=1, allowed=1, lockerr, migrateerr, populateerr, mapfail, locked, maps;
+static long waitret=1;
+static int xg_maps_lock;
+static struct list_head xg_maps;
+static struct xg_map *last;
+static void drm_vma_offset_lock_lookup(void *p) {}
+static void drm_vma_offset_unlock_lookup(void *p) {}
+static struct drm_vma_offset_node *drm_vma_offset_lookup_locked(void *p,u64 o,u64 s) { return found ? &bo.ttm.base.vma_node : NULL; }
+static int drm_vma_node_is_allowed(void *n,void *p) { return allowed; }
+static int kref_get_unless_zero(int *r) { if (!*r) return 0; ++*r; return 1; }
+static u64 drm_vma_node_offset_addr(struct drm_vma_offset_node *n) { return n->offset; }
+static struct xe_bo *gem_to_xe_bo(struct drm_gem_object *g) { return &bo; }
+static int xe_bo_lock(struct xe_bo *b,bool intr) { if (!lockerr) locked++; return lockerr; }
+static void xe_bo_unlock(struct xe_bo *b) { assert(locked==1); locked--; }
+static int xe_bo_migrate(struct xe_bo *b,int t) { assert(locked); return migrateerr; }
+static long dma_resv_wait_timeout(void *p,int u,bool intr,long timeout) { return waitret; }
+static int ttm_tt_populate(void *b,struct ttm_tt *t,struct ttm_operation_ctx *c) { return populateerr; }
+static void *kcalloc(unsigned n,size_t s,int f) { return calloc(n,s); }
+static void *kzalloc(size_t s,int f) { return calloc(1,s); }
+#define kfree free
+static u64 page_to_phys(struct page *p) { return p->pa; }
+static void *xg_vm_x_map_user(u64 *pa,u64 *len,unsigned n,int cache,int w,u64 *addr) {
+ assert(locked && n==2 && pa[0]==0x1000 && len[0]==8192 && pa[1]==0x8000 && len[1]==4096);
+ assert(cache==XG_VM_CACHE_WB && w); maps++; *addr=0x100000; return mapfail ? NULL : (void *)1;
+}
+static void ttm_bo_pin(struct ttm_buffer_object *b) { assert(locked); b->pin_count++; }
+static void ttm_bo_unpin(struct ttm_buffer_object *b) { assert(locked && b->pin_count); b->pin_count--; }
+static void xg_vm_x_release(void *xm) { assert(xm==(void *)1 && bo.ttm.pin_count); }
+static void xe_bo_put(struct xe_bo *b) { b->ttm.base.refcount--; }
+static void mutex_lock(int *m) {}
+static void mutex_unlock(int *m) {}
+static void list_add(struct list_head *l,struct list_head *h) { last=container_of(l,struct xg_map,link); }
+''' + release + code + '''
+int main(void) {
+ struct drm_device dev={0}; struct drm_minor minor={&dev};
+ struct drm_file priv={&minor}; struct file file={&priv};
+ struct page p[]={{0x1000},{0x2000},{0x8000}};
+ struct page *pages[]={p,p+1,p+2}; struct ttm_tt tt={3,pages};
+ bo.ttm.ttm=&tt; bo.flags=XE_BO_FLAG_SYSTEM; bo.cpu_caching=1;
+ bo.ttm.base.size=3*PAGE_SIZE; bo.ttm.base.refcount=1; bo.ttm.base.vma_node.offset=0x400000;
+ struct xg_drm_mmap a={.offset=0x400000,.size=3*PAGE_SIZE,.prot=3};
+ found=0; assert(xg_map_mmap(&file,&file,&a)==-EINVAL); found=1;
+ allowed=0; assert(xg_map_mmap(&file,&file,&a)==-EACCES); allowed=1;
+ a.offset++; assert(xg_map_mmap(&file,&file,&a)==-EINVAL); a.offset--;
+ a.flags=1; assert(xg_map_mmap(&file,&file,&a)==-EINVAL); a.flags=0;
+ a.size=UINT64_MAX & ~(PAGE_SIZE-1); assert(xg_map_mmap(&file,&file,&a)==-EINVAL); a.size=3*PAGE_SIZE;
+ a.offset+=PAGE_SIZE; assert(xg_map_mmap(&file,&file,&a)==-EINVAL); a.offset-=PAGE_SIZE;
+ bo.flags=0; assert(xg_map_mmap(&file,&file,&a)==-EOPNOTSUPP); bo.flags=XE_BO_FLAG_SYSTEM;
+ bo.ttm.base.import_attach=&bo; assert(xg_map_mmap(&file,&file,&a)==-EOPNOTSUPP); bo.ttm.base.import_attach=NULL;
+ lockerr=-EINTR; assert(xg_map_mmap(&file,&file,&a)==-EINTR); lockerr=0;
+ migrateerr=-ENOMEM; assert(xg_map_mmap(&file,&file,&a)==-ENOMEM); migrateerr=0;
+ waitret=-EINTR; assert(xg_map_mmap(&file,&file,&a)==-EINTR); waitret=1;
+ populateerr=-ENOMEM; assert(xg_map_mmap(&file,&file,&a)==-ENOMEM); populateerr=0;
+ pages[1]=NULL; assert(xg_map_mmap(&file,&file,&a)==-ENODEV); pages[1]=p+1;
+ assert(!locked && bo.ttm.base.refcount==1 && !bo.ttm.pin_count);
+ mapfail=1; assert(xg_map_mmap(&file,&file,&a)==-ENOMEM);
+ assert(!locked && bo.ttm.base.refcount==1 && !bo.ttm.pin_count);
+ mapfail=0; assert(!xg_map_mmap(&file,&file,&a));
+ assert(!locked && bo.ttm.base.refcount==2 && bo.ttm.pin_count==1);
+ assert(last && last->key==&file && last->obj==&bo && a.addr==last->addr && maps==2);
+ xg_map_free(last);
+ assert(!locked && bo.ttm.base.refcount==1 && !bo.ttm.pin_count);
+}
+''')
+
+    def test_mapping_cleanup_at_final_file_drop(self):
+        text = (ROOT / 'shim/src/fbsd/xg_fd.c').read_text()
+        code = between(text, 'int\n_fdrop(', '\n/*\n * Private descriptor tables')
+        close = between(text, 'xg_fd_dev_close(', '\nint\nxg_fd_inst_fget(')
+        self.assertNotIn('xg_fd_map_close(fp)', close)
+        self.compile_run('''
+#include <assert.h>
+#include <stdlib.h>
+struct file { unsigned f_count; };
+struct thread { int unused; };
+static int xg_fd_openfiles=1, released, closed;
+#define KASSERT(c,msg) assert(c)
+#define M_XGFD 0
+static unsigned refcount_load(unsigned *p) { return *p; }
+static void atomic_subtract_int(int *p,int n) { *p-=n; }
+static void release_maps(void *p) { assert(!closed); released++; }
+void (*xg_fd_map_close)(void *)=release_maps;
+static int fo_close(struct file *p,struct thread *t) { assert(released==1); closed++; return 0; }
+#define free(p,t) free(p)
+''' + code + '''
+int main(void) {
+ struct file *fp=calloc(1,sizeof(*fp)); struct thread td={0};
+ assert(!_fdrop(fp,&td));
+ assert(released==1 && closed==1 && !xg_fd_openfiles);
+}
+''')
+
     def test_bootfb_actual_layout(self):
         text = (ROOT / 'shim/src/xnu/xg_kext.cpp').read_text()
         fn = between(text, 'static int\nxg_xe_bootfb_layout(',

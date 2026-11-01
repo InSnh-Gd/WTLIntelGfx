@@ -235,8 +235,12 @@ int
 _fdrop(struct file *fp, struct thread *td)
 {
 	int error;
+	extern void (*xg_fd_map_close)(void *key);
 
 	KASSERT(refcount_load(&fp->f_count) == 0, ("fdrop: fp %p count %d", fp, refcount_load(&fp->f_count)));
+	/* In-flight ioctls hold fp: release mappings only after their final insertion. */
+	if (xg_fd_map_close != NULL)
+		xg_fd_map_close(fp);
 	error = fo_close(fp, td);
 	atomic_subtract_int(&xg_fd_openfiles, 1);
 	free(fp, M_XGFD);
@@ -1113,8 +1117,6 @@ xg_fd_dev_close(int inst)
 	xi->xi_state = XI_FREE;
 	xg_fd_unlock();
 
-	if (xg_fd_map_close != NULL)
-		xg_fd_map_close(fp);
 	error = fdrop(fp, td);
 	if (dead != NULL)
 		xg_fd_tbl_close(dead, td);

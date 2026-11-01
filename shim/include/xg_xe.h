@@ -35,6 +35,7 @@ int xg_xe_bootfb_phys_get(unsigned long long *phys, unsigned long long *size);
 int xg_xe_bootfb_checksum(unsigned long long *ptes, unsigned long long *pixels);
 int xg_xe_state(struct xg_xe_state *st);
 int xg_xe_exec(struct xg_xe_exec *ex, int timeout_ms);
+void xg_xe_map_init(void);
 #ifdef __cplusplus
 }
 #endif

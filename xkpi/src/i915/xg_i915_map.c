@@ -9,15 +9,22 @@
 #include <linux/list.h>
 #include <linux/pci.h>
 #include <linux/mutex.h>
+#include <linux/dma-resv.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 
 #include <drm/drm_file.h>
 #include <drm/drm_vma_manager.h>
 
+#ifdef XEGFX_KMD_XE
+#include <drm/ttm/ttm_bo.h>
+#include "xe_bo.h"
+#include "xg_xe.h"
+#else
 #include "i915_drv.h"
 #include "gem/i915_gem_mman.h"
 #include "gem/i915_gem_object.h"
+#endif
 
 #include "xg_drm_sync.h"
 #include "xg_i915.h"
@@ -45,7 +52,11 @@ struct xg_map {
 	void				*key;
 	u64				addr, size;
 	xg_vm_xmem_t			xm;
+#ifdef XEGFX_KMD_XE
+	struct xe_bo			*obj;
+#else
 	struct drm_i915_gem_object	*obj;
+#endif
 };
 
 static LIST_HEAD(xg_maps);
@@ -58,11 +69,19 @@ static void
 xg_map_free(struct xg_map *m)
 {
 	xg_vm_x_release(m->xm);
+#ifdef XEGFX_KMD_XE
+	xe_bo_lock(m->obj, false);
+	ttm_bo_unpin(&m->obj->ttm);
+	xe_bo_unlock(m->obj);
+	xe_bo_put(m->obj);
+#else
 	i915_gem_object_unpin_pages(m->obj);
 	i915_gem_object_put(m->obj);
+#endif
 	kfree(m);
 }
 
+#ifndef XEGFX_KMD_XE
 /* physical ranges for [skip, skip + size) of the object's pages, neighbours merged */
 static int
 xg_map_ranges(struct sg_table *sgt, u64 skip, u64 size, u64 **pap, u64 **lenp, unsigned int *np)
@@ -208,6 +227,128 @@ put:
 	i915_gem_object_put(obj);
 	return err;
 }
+#else
+/* Mesa 0001's Darwin map ABI, adapted to WTL's physical-run mapper.
+ * A pinned system-memory BO cannot migrate while IOKit exposes its pages. */
+static int
+xg_map_mmap(struct file *filp, void *key, struct xg_drm_mmap *a)
+{
+	struct drm_file *priv = filp->private_data;
+	struct drm_device *dev = priv->minor->dev;
+	struct drm_vma_offset_node *node;
+	struct drm_gem_object *gem = NULL;
+	struct xe_bo *bo;
+	struct ttm_tt *tt;
+	struct ttm_operation_ctx ctx = { .interruptible = true };
+	struct xg_map *m;
+	u64 skip = 0, *pa, *len;
+	unsigned int i, n = 0, first, count;
+	int cache, err = -EINVAL;
+	long waited;
+
+	if (!a->size || ((a->offset | a->size) & (PAGE_SIZE - 1)) || a->flags ||
+	    (a->prot & ~3u) || (a->size >> PAGE_SHIFT) > UINT_MAX)
+		return -EINVAL;
+	drm_vma_offset_lock_lookup(dev->vma_offset_manager);
+	node = drm_vma_offset_lookup_locked(dev->vma_offset_manager,
+	    a->offset >> PAGE_SHIFT, a->size >> PAGE_SHIFT);
+	if (node && drm_vma_node_is_allowed(node, priv)) {
+		gem = container_of(node, struct drm_gem_object, vma_node);
+		if (!kref_get_unless_zero(&gem->refcount))
+			gem = NULL;
+		else
+			skip = a->offset - drm_vma_node_offset_addr(node);
+	} else if (node) {
+		err = -EACCES;
+	}
+	drm_vma_offset_unlock_lookup(dev->vma_offset_manager);
+	if (!gem)
+		return err;
+	bo = gem_to_xe_bo(gem);
+	if (skip > gem->size || a->size > gem->size - skip)
+		goto put;
+	/* Imported/VRAM/stolen objects need revocable or device mappings. */
+	if (!(bo->flags & XE_BO_FLAG_SYSTEM) || gem->import_attach) {
+		err = -EOPNOTSUPP;
+		goto put;
+	}
+	err = xe_bo_lock(bo, true);
+	if (err)
+		goto put;
+	err = xe_bo_migrate(bo, XE_PL_TT);
+	if (err)
+		goto unlock;
+	/* As in ttm_bo_vm_fault_idle: only migration fences guard physical backing. */
+	waited = dma_resv_wait_timeout(gem->resv, DMA_RESV_USAGE_KERNEL, true, MAX_SCHEDULE_TIMEOUT);
+	if (waited <= 0) {
+		err = waited < 0 ? waited : -EBUSY;
+		goto unlock;
+	}
+	tt = bo->ttm.ttm;
+	if (!tt) {
+		err = -ENODEV;
+		goto unlock;
+	}
+	err = ttm_tt_populate(bo->ttm.bdev, tt, &ctx);
+	if (err)
+		goto unlock;
+	if ((skip >> PAGE_SHIFT) > tt->num_pages) {
+		err = -EINVAL;
+		goto unlock;
+	}
+	first = skip >> PAGE_SHIFT;
+	count = a->size >> PAGE_SHIFT;
+	if (first > tt->num_pages || count > tt->num_pages - first) {
+		err = -EINVAL;
+		goto unlock;
+	}
+	pa = kcalloc(count, sizeof(*pa), GFP_KERNEL);
+	len = kcalloc(count, sizeof(*len), GFP_KERNEL);
+	m = kzalloc(sizeof(*m), GFP_KERNEL);
+	err = -ENOMEM;
+	if (!pa || !len || !m)
+		goto ranges;
+	for (i = 0; i < count; i++) {
+		u64 p;
+		if (!tt->pages[first + i]) {
+			err = -ENODEV;
+			goto ranges;
+		}
+		p = page_to_phys(tt->pages[first + i]);
+		if (n && pa[n - 1] + len[n - 1] == p)
+			len[n - 1] += PAGE_SIZE;
+		else {
+			pa[n] = p;
+			len[n++] = PAGE_SIZE;
+		}
+	}
+	cache = bo->cpu_caching == DRM_XE_GEM_CPU_CACHING_WB ? XG_VM_CACHE_WB : XG_VM_CACHE_WC;
+	m->xm = xg_vm_x_map_user(pa, len, n, cache, !!(a->prot & XG_PROT_WRITE), &m->addr);
+	if (!m->xm)
+		goto ranges;
+	ttm_bo_pin(&bo->ttm);
+	xe_bo_unlock(bo);
+	kfree(pa);
+	kfree(len);
+	m->key = key;
+	m->size = a->size;
+	m->obj = bo;
+	mutex_lock(&xg_maps_lock);
+	list_add(&m->link, &xg_maps);
+	mutex_unlock(&xg_maps_lock);
+	a->addr = m->addr;
+	return 0;
+ranges:
+	kfree(pa);
+	kfree(len);
+	kfree(m);
+unlock:
+	xe_bo_unlock(bo);
+put:
+	xe_bo_put(bo);
+	return err;
+}
+#endif
 
 static int
 xg_map_munmap(void *key, struct xg_drm_munmap *a)
@@ -281,7 +422,11 @@ xg_map_close(void *key)
 }
 
 void
+#ifdef XEGFX_KMD_XE
+xg_xe_map_init(void)
+#else
 xg_i915_map_init(void)
+#endif
 {
 	xg_fd_map_close = xg_map_close;
 	xg_fd_map_ioctl = xg_map_ioctl;
