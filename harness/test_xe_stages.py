@@ -81,6 +81,58 @@ int main(void) {
 }
 ''')
 
+    def test_opportunistic_allocations_skip_contiguous(self):
+        code = between((ROOT / 'xkpi/src/lkpi/linux_page.c').read_text(),
+                       'struct page *\nlinux_alloc_pages(', '\nstatic void\n_linux_free_kmem(')
+        self.compile_run('''
+#include <assert.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <errno.h>
+typedef unsigned gfp_t;
+typedef uintptr_t vm_paddr_t;
+typedef uintptr_t vm_offset_t;
+struct page { int unused; };
+static struct page p;
+static unsigned calls, contiguous;
+#define PMAP_HAS_DMAP 1
+#define PAGE_SIZE 4096
+#define VM_ALLOC_WIRED 1
+#define VM_ALLOC_ZERO 2
+#define VM_ALLOC_NORECLAIM 4
+#define M_ZERO 1
+#define GFP_DMA32 2
+#define __GFP_NORETRY 4
+#define __GFP_THISNODE 8
+#define M_WAITOK 16
+#define BUS_SPACE_MAXADDR UINTPTR_MAX
+#define BUS_SPACE_MAXADDR_32BIT UINT32_MAX
+#define PCPU_GET(x) 0
+#define KASSERT(c,msg) assert(c)
+static struct page *vm_page_alloc_noobj(int req) { calls++; return &p; }
+static struct page *vm_page_alloc_noobj_contig(int r,unsigned long n,uintptr_t l,uintptr_t h,int a,int b,int m) {
+ calls++; contiguous++; return &p;
+}
+#define vm_page_alloc_noobj_contig_domain(d,r,n,l,h,a,b,m) ((void)(d),vm_page_alloc_noobj_contig(r,n,l,h,a,b,m))
+#define VM_MEMATTR_DEFAULT 0
+static int vm_page_reclaim_contig(int r,unsigned long n,uintptr_t l,uintptr_t h,int a,int b) { return ENOMEM; }
+static void vm_wait(void *p) { assert(0); }
+static uintptr_t linux_alloc_kmem(unsigned f,unsigned o) { assert(0); return 0; }
+static struct page *virt_to_page(void *v) { return &p; }
+static void *page_address(struct page *p) { return NULL; }
+''' + code + '''
+int main(void) {
+ for (unsigned i=1;i<=10;i++) {
+  assert(!linux_alloc_pages(__GFP_NORETRY,i));
+  assert(!linux_alloc_pages(__GFP_NORETRY|GFP_DMA32|M_WAITOK,i));
+ }
+ assert(!calls);
+ assert(linux_alloc_pages(__GFP_NORETRY,0)==&p && calls==1 && !contiguous);
+ assert(linux_alloc_pages(__GFP_NORETRY|GFP_DMA32,0)==&p && contiguous==1);
+ assert(linux_alloc_pages(M_WAITOK,2)==&p && contiguous==2);
+}
+''')
+
     def test_bootfb_actual_layout(self):
         text = (ROOT / 'shim/src/xnu/xg_kext.cpp').read_text()
         fn = between(text, 'static int\nxg_xe_bootfb_layout(',

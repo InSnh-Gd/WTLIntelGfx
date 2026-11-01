@@ -101,6 +101,10 @@ linux_alloc_pages(gfp_t flags, unsigned int order)
 {
 	struct page *page;
 
+	/* vibe-nullmoth xkpi/0046: XNU contiguous attempts are expensive under fragmentation. */
+	if (order > 0 && (flags & __GFP_NORETRY) != 0)
+		return (NULL);
+
 	if (PMAP_HAS_DMAP) {
 		unsigned long npages = 1UL << order;
 		int req = VM_ALLOC_WIRED;
