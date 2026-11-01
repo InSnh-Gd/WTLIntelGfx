@@ -75,4 +75,12 @@ edit("xe_heci_gsc.c", [
     ("pdev->resource[0].start", "pci_resource_start(pdev, 0)", 1),
 ])
 
+# glibc exposes program_invocation_short_name; use argv[0] so the host-side
+# WA generator also builds with Apple's libc.
+edit("xe_gen_wa_oob.c", [
+    ("static void print_usage(FILE *f)\n", "static void print_usage(FILE *f, const char *program)\n", 1),
+    ("\t\tprogram_invocation_short_name);", "\t\tprogram);", 1),
+    ("\t\tprint_usage(stderr);", "\t\tprint_usage(stderr, argv[0]);", 1),
+])
+
 print("xe fork applied")

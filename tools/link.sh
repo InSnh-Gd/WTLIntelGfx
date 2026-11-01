@@ -5,8 +5,8 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 KMD=${XEGFX_KMD:-$(cat "$ROOT/out/kmd.txt" 2>/dev/null || echo i915)}
 case "$KMD" in
-  i915) KMD_FLAGS=(); FW_IMAGE=mtl_guc_70.bin; FW_LICENSE=LICENSE.i915 ;;
-  xe) KMD_FLAGS=(-DXEGFX_KMD_XE=1); FW_IMAGE=xe/ptl_guc_70.bin; FW_LICENSE=LICENSE.xe ;;
+  i915) KMD_FLAGS=""; FW_IMAGE=mtl_guc_70.bin; FW_LICENSE=LICENSE.i915 ;;
+  xe) KMD_FLAGS="-DXEGFX_KMD_XE=1"; FW_IMAGE=xe/ptl_guc_70.bin; FW_LICENSE=LICENSE.xe ;;
   *) echo "STOP: XEGFX_KMD must be i915 or xe"; exit 1 ;;
 esac
 if [ -f "$ROOT/out/kmd.txt" ] && [ "$(cat "$ROOT/out/kmd.txt")" != "$KMD" ]; then
@@ -27,7 +27,7 @@ xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -mkernel -ffreestanding -nost
 for cpp in "$ROOT"/shim/src/xnu/*.cpp; do
   xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -mkernel -nostdinc -isysroot "$SDK" -I"$K" \
     -I"$ROOT/shim/include" -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT -std=c++17 -fno-rtti -fno-exceptions \
-    "${KMD_FLAGS[@]}" -O2 -Wall -Wno-inconsistent-missing-override -Wno-deprecated-declarations -c "$cpp" -o "$O/$(basename "$cpp").o"
+    ${KMD_FLAGS} -O2 -Wall -Wno-inconsistent-missing-override -Wno-deprecated-declarations -c "$cpp" -o "$O/$(basename "$cpp").o"
 done
 # firmware linked into the binary, so no daemon round trip is needed (empty table without linux-firmware)
 FW=${XEGFX_FW:-$HOME/src/xe-src/linux-firmware}
