@@ -267,6 +267,43 @@ int main(void) {
 }
 ''')
 
+    def test_mesa_xe_darwin_map_arguments(self):
+        patch = (ROOT / 'userland/patches/mesa-xegfx.patch').read_text()
+        section = between(patch, '--- a/src/intel/vulkan/xe/anv_kmd_backend.c',
+                          '--- a/src/intel/vulkan/xe/anv_device.c')
+        added = '\n'.join(line[1:] for line in section.splitlines()
+                          if line.startswith('+') and not line.startswith('+++'))
+        self.compile_run('''
+#include <assert.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <sys/types.h>
+#include <sys/mman.h>
+#define __APPLE__ 1
+#define align64(x,a) (((x)+(a)-1)&~((uint64_t)(a)-1))
+struct anv_device { int fd; };
+static size_t mapped_size;
+static off_t mapped_offset;
+static unsigned calls;
+void *drmNmxMmap(size_t n,int prot,int flags,int fd,off_t offset) {
+ assert(fd==7 && prot==(PROT_READ|PROT_WRITE) && flags==MAP_SHARED);
+ calls++; mapped_size=n; mapped_offset=offset; return (void *)0x100000;
+}
+static void *map(struct anv_device *device,uint64_t mmap_offset,uint64_t offset,uint64_t size,void *placed_addr) {
+ struct { uint64_t offset; } args={mmap_offset};
+''' + added + '''
+}
+int main(void) {
+ struct anv_device dev={7};
+ assert(map(&dev,0x400000,8192,4097,NULL)==(void *)0x100000);
+ assert(calls==1 && mapped_size==8192 && mapped_offset==0x402000);
+ assert(map(&dev,0x400000,0,4096,(void *)0x100000)==MAP_FAILED);
+ assert(map(&dev,UINT64_MAX-4095,4096,4096,NULL)==MAP_FAILED);
+ assert(map(&dev,0,0,UINT64_MAX,NULL)==MAP_FAILED);
+ assert(calls==1);
+}
+''')
+
     def test_bootfb_actual_layout(self):
         text = (ROOT / 'shim/src/xnu/xg_kext.cpp').read_text()
         fn = between(text, 'static int\nxg_xe_bootfb_layout(',

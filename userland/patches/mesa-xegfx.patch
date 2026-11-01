@@ -88,6 +88,34 @@
  
 --- a/src/intel/vulkan/anv_physical_device.c
 +++ b/src/intel/vulkan/anv_physical_device.c
+@@ -580,6 +580,11 @@
+       .EXT_legacy_vertex_attributes          = true,
+       .EXT_line_rasterization                = true,
+       .EXT_load_store_op_none                = true,
++#ifdef __APPLE__
++      /* IOKit BO mappings choose their address; placed mappings are unsupported. */
++      .EXT_map_memory_placed                 = false,
++#else
+       .EXT_map_memory_placed                 = device->info.has_mmap_offset,
++#endif
+       /* Enable the extension only if we have support on both the local &
+        * system memory
+@@ -1170,6 +1175,13 @@
+       /* VK_EXT_map_memory_placed */
++#ifdef __APPLE__
++      .memoryMapPlaced = false,
++      .memoryUnmapReserve = false,
++#else
+       .memoryMapPlaced = true,
++#endif
+       .memoryMapRangePlaced = false,
+-      .memoryUnmapReserve = true,
++#ifndef __APPLE__
++      .memoryUnmapReserve = true,
++#endif
+-
++
+       /* VK_KHR_shader_quad_control */
 @@ -3014,7 +3014,11 @@
     int master_fd = -1;
     int ret;
@@ -131,6 +159,48 @@
     if (device->physical->info.is_virtio)
        ptr = intel_virtio_bo_mmap(device->fd, bo->gem_handle,
                                   offset + size, placed_addr);
+--- a/src/intel/vulkan/xe/anv_kmd_backend.c
++++ b/src/intel/vulkan/xe/anv_kmd_backend.c
+@@ -158,5 +158,16 @@
+    if (intel_ioctl(device->fd, DRM_IOCTL_XE_GEM_MMAP_OFFSET, &args))
+       return MAP_FAILED;
+-
++
++#ifdef __APPLE__
++   /* vibe-nullmoth Mesa/0001, using WTL's existing libdrm map bookkeeping. */
++   extern void *drmNmxMmap(size_t length, int prot, int flags, int fd, off_t offset);
++   if (placed_addr != NULL)
++      return MAP_FAILED;
++   if (offset > UINT64_MAX - args.offset || size > UINT64_MAX - 4095)
++      return MAP_FAILED;
++   return drmNmxMmap(align64(size, 4096), PROT_READ | PROT_WRITE,
++                     MAP_SHARED, device->fd, args.offset + offset);
++#endif
++
+    if (placed_addr != NULL) {
+       const uint64_t placed_num = (uintptr_t)placed_addr;
+--- a/src/intel/vulkan/xe/anv_device.c
++++ b/src/intel/vulkan/xe/anv_device.c
+@@ -24,4 +24,5 @@
+ #include "anv_private.h"
+ #include "vk_debug_utils.h"
++#include "util/u_debug.h"
+-
++
+ #include "drm-uapi/gpu_scheduler.h"
+@@ -157,7 +157,12 @@
+       device->memory.types[device->memory.type_count++] = (struct anv_memory_type) {
+          .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+          .heapIndex = 0,
++#ifdef __APPLE__
++         /* vibe-nullmoth Mesa/0004: coherent host mappings start without compression. */
++         .compressed = device->info.ver >= 20 && debug_get_bool_option("ANV_XE2_COMPRESS", false),
++#else
+          .compressed = device->info.ver >= 20,
++#endif
+       };
+       device->memory.types[device->memory.type_count++] = (struct anv_memory_type) {
+          .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
 --- a/src/util/anon_file.c
 +++ b/src/util/anon_file.c
 @@ -114,7 +114,12 @@

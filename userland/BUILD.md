@@ -12,6 +12,30 @@ Built 2026-10-21 on the Legion (macOS Tahoe 26.7.1 25G241, Core Ultra 9 275HX), 
 
 Both patches applied with no rejects. No source change was needed on top of them. Mesa was fetched shallow (depth 1) by full SHA, which was resolved from the short one through the GitLab API.
 
+### WTL xe additions (2026-11-01)
+
+After `mesa-macos.patch`, apply `mesa-xegfx.patch`. The latter now includes
+the xe backend's Darwin map call, using libdrm's existing `drmNmxMmap` and
+`drmNmxMunmap` tracking instead of a second Mesa map registry. The kernel
+side is enabled by `XEGFX_KMD=xe` and registers the same map/PCI-info/fence
+ABI as i915. It currently maps native system-memory BOs, including subranges,
+with pages pinned until unmap or final file release. Imported, VRAM and stolen
+objects return `EOPNOTSUPP`; fixed-address mappings are not supported.
+`VK_EXT_map_memory_placed` and its features are therefore disabled on Darwin.
+
+Darwin Xe2+ compression is disabled by default. To opt in explicitly, set
+`ANV_XE2_COMPRESS=true`; `ANV_XE2_COMPRESS=0` keeps it disabled. This differs
+intentionally from the reference patch's environment-variable-presence test.
+The existing cached-coherent iGPU PAT choice is retained.
+
+Both patch application and the kernel bridge's C build/host tests were
+verified for this integration; the ANV dylib was not rebuilt or run in this
+Linux environment. The build and chip matrix results later in this document
+describe the earlier macOS build, not a runtime validation of these additions.
+Host-pointer/IOSurface import remains blocked on the xe userptr path; ordinary
+BO mmap support alone does not enable that Metal path. Exact sources and
+test evidence are recorded in [vibe-nullmoth-reuse.md](../docs/vibe-nullmoth-reuse.md).
+
 ## Toolchain
 
 Apple clang 21.0.0 (CLT), `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk`, MacPorts meson 1.12.1, ninja, glslang 16.6.0, cmake, LLVM 20.1.8 (host tools only), SPIRV-LLVM-Translator from `~/.local/nvgfx-llvm/lib/pkgconfig` (host tools only). Python 3.14.8 venv `~/.venvs/mesa` (from MacPorts python3.14) with mako 1.4.3, PyYAML 6.0.3, packaging 26.3; its `bin` is first in PATH so meson's python finds mako.
@@ -123,4 +147,4 @@ Limits of this proof: the noop shim fakes the **i915** uAPI for every chip (it p
 
 ## XeGfx patches (2026-10-22)
 
-On top of NullMoth's two patches, for real XeGfx hardware: `patches/libdrm-xegfx.patch` (adds `xf86drm_xegfx.c`, the dma-buf and sync_file stand-ins, called first from `drmIoctl()`) and `patches/mesa-xegfx.patch` (`intel_ioctl()` through `drmIoctl()`, i915 GEM mappings through `drmNmxMmap`/`drmNmxMunmap` with a fallback to mmap(2) for drm-shim). Apply with `git apply` in `drm/` and `mesa/` after the NullMoth patches, then rerun `build_libdrm.sh` and the Mesa build. The noop drm-shim matrix still passes 28 of 28 chips with both applied.
+On top of NullMoth's two patches, for real XeGfx hardware: `patches/libdrm-xegfx.patch` (adds `xf86drm_xegfx.c`, the dma-buf and sync_file stand-ins, called first from `drmIoctl()`) and `patches/mesa-xegfx.patch` (`intel_ioctl()` through `drmIoctl()`, i915 and xe GEM mappings through `drmNmxMmap`/`drmNmxMunmap`). Apply with `git apply` in `drm/` and `mesa/` after the NullMoth patches, then rerun `build_libdrm.sh` and the Mesa build. The earlier i915-only patch version passed the noop drm-shim matrix for 28 of 28 chips; the 2026-11-01 xe additions have the separate verification scope recorded above.
