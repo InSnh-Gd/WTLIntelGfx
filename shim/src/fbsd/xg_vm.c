@@ -1745,10 +1745,32 @@ pmap_kextract(vm_offset_t va)
 }
 
 /* ---- pmap page operations ---- */
+/* vibe-nullmoth xkpi/0033-0034: dirty WB aliases must not overwrite WC/GPU writes. */
+void
+xg_kunmap_flush(const void *addr)
+{
+	vm_offset_t va = trunc_page((vm_offset_t)addr);
+	vm_page_t m;
+
+	if (addr == NULL)
+		return;
+	m = PHYS_TO_VM_PAGE(pmap_kextract(va));
+	if (m != NULL && m->md.pat_mode != VM_MEMATTR_WRITE_BACK)
+		xg_vm_x_flush((void *)va, PAGE_SIZE);
+}
+
+void
+xg_clear_page(void *addr)
+{
+	bzero(addr, PAGE_SIZE);
+	xg_kunmap_flush(addr);
+}
+
 void
 pmap_zero_page(vm_page_t m)
 {
 	xg_vm_zero(m);
+	xg_kunmap_flush(PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m)));
 }
 
 void

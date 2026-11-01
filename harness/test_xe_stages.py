@@ -25,6 +25,62 @@ class XeStages(unittest.TestCase):
                             '-fsanitize=undefined', str(c), '-o', exe], check=True)
             subprocess.run([exe], check=True, timeout=20)
 
+    def test_non_wb_alias_flush(self):
+        text = (ROOT / 'shim/src/fbsd/xg_vm.c').read_text()
+        code = between(text, 'void\nxg_kunmap_flush(', '\nvoid\npmap_copy_page(')
+        header = (ROOT / 'xkpi/include/linux/highmem.h').read_text()
+        wrappers = between(header, 'static inline void\nkunmap(', '\n#endif')
+        self.compile_run('''
+#include <assert.h>
+#include <stdint.h>
+#include <string.h>
+#define PAGE_SIZE 4096
+#define VM_MEMATTR_WRITE_BACK 0
+#define trunc_page(x) ((x) & ~(uintptr_t)(PAGE_SIZE-1))
+typedef uintptr_t vm_offset_t;
+struct page { struct { int pat_mode; } md; char *kva; };
+typedef struct page *vm_page_t;
+struct folio { struct page page; };
+static char data[PAGE_SIZE] __attribute__((aligned(PAGE_SIZE)));
+static struct page page;
+static int flushes, unmaps, known=1;
+static uintptr_t pmap_kextract(uintptr_t va) { return va; }
+static vm_page_t PHYS_TO_VM_PAGE(uintptr_t pa) { return known && pa==(uintptr_t)data ? &page : NULL; }
+static void xg_vm_x_flush(void *va, unsigned long n) {
+ assert(va==data && n==PAGE_SIZE); flushes++;
+}
+static void xg_vm_zero(vm_page_t p) { memset(p->kva,0,PAGE_SIZE); }
+#define bzero(p,n) memset(p,0,n)
+#define PHYS_TO_DMAP(p) ((void *)(p))
+#define VM_PAGE_TO_PHYS(p) ((uintptr_t)(p)->kva)
+#define page_address(p) ((p)->kva)
+static void xg_lkpi_kunmap(struct page *p) { unmaps++; }
+static void xg_lkpi_kunmap_atomic(void *p) { unmaps++; }
+static void xg_lkpi_kunmap_local(void *p) { unmaps++; }
+static void xg_lkpi_memcpy_to_page(struct page *p,size_t o,const char *s,size_t n) { memcpy(p->kva+o,s,n); }
+''' + code + wrappers + '''
+int main(void) {
+ page.kva=data;
+ memset(data,1,sizeof(data)); xg_clear_page(data);
+ for (int i=0;i<PAGE_SIZE;i++) assert(data[i]==0);
+ assert(!flushes);
+ page.md.pat_mode=1;
+ kunmap(&page); kunmap_atomic(data+37); kunmap_local(data+4095);
+ assert(flushes==3 && unmaps==3);
+ memcpy_to_page(&page,17,"abc",3);
+ assert(!memcmp(data+17,"abc",3) && flushes==4);
+ struct folio folio={.page=page};
+ memcpy_to_folio(&folio,20,"def",3);
+ assert(!memcmp(data+20,"def",3) && flushes==5);
+ xg_clear_page(data); assert(flushes==6);
+ pmap_zero_page(&page); assert(flushes==7);
+ page.md.pat_mode=2; xg_kunmap_flush(data); assert(flushes==8);
+ known=0; xg_kunmap_flush(data); assert(flushes==8);
+ xg_kunmap_flush(NULL); assert(flushes==8);
+ page.md.pat_mode=0; known=1; kunmap_local(data); assert(flushes==8);
+}
+''')
+
     def test_bootfb_actual_layout(self):
         text = (ROOT / 'shim/src/xnu/xg_kext.cpp').read_text()
         fn = between(text, 'static int\nxg_xe_bootfb_layout(',
